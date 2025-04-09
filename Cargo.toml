@@ -1,0 +1,11 @@
+[workspace]
+resolver = "3"
+members = [
+  "ucftp_sender",
+  "ucftp_receiver",
+  "ucftp_shared"
+]
+
+[workspace.package]
+rust-version = "1.86"
+edition = "2024"
