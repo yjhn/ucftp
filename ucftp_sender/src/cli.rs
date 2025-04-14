@@ -6,30 +6,33 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(name = "scftp")]
 #[command(arg_required_else_help = true)]
 pub struct Cli {
+    /// Address or hostname of the remote
+    pub remote: String,
     #[command(subcommand)]
-    command: Command,
+    pub command: Command,
     /// Conditionally execute current command if the command of the provided
     /// session ID has not been executed or has failed
     #[arg(long)]
-    unless: Option<u64>,
+    pub unless: Option<u64>,
     /// Commands that must be executed before this one
     #[arg(long)]
-    after: Option<Vec<u64>>,
+    pub after: Vec<u64>,
 }
 
 /// Protocol capabilities
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Execute file
-    // #[command(arg_required_else_help = true)]
+    #[command(arg_required_else_help = true)]
     Run {
         /// Absolute path of the program to be executed
         path: String,
         /// Arguments of the program
-        args: Option<Vec<String>>,
+        #[arg(long, short)]
+        args: Vec<String>,
         /// Environment variables to set before executing the command. For this command only
-        #[arg(value_parser = parse_key_val::<String, String>, last = true)]
-        env: Option<Vec<(String, String)>>,
+        #[arg(long, short, value_parser = parse_key_val::<String, String>)]
+        env: Vec<(String, String)>,
     },
     /// Execute command in default shell
     #[command(arg_required_else_help = true)]
@@ -38,8 +41,8 @@ pub enum Command {
     #[command(arg_required_else_help = true)]
     SetEnv {
         /// A set of key-value pairs of the form KEY=VALUE
-        #[arg(value_parser = parse_key_val::<String, String>, last = true)]
-        env: Option<Vec<(String, String)>>,
+        #[arg(value_parser = parse_key_val::<String, String>)]
+        env: Vec<(String, String)>,
     },
     /// Remove environment variables
     #[command(arg_required_else_help = true)]
@@ -53,10 +56,11 @@ pub enum Command {
         /// Session ID of the command that sent the file
         id: u64,
         /// Arguments of the program
-        args: Option<Vec<String>>,
+        #[arg(long, short)]
+        args: Vec<String>,
         /// Environment variables to set before exectuing the command. For this command only
-        #[arg(value_parser = parse_key_val::<String, String>, last = true)]
-        env: Option<Vec<(String, String)>>,
+        #[arg(long, short, value_parser = parse_key_val::<String, String>)]
+        env: Vec<(String, String)>,
     },
     /// Create directory
     #[command(arg_required_else_help = true)]
@@ -66,10 +70,8 @@ pub enum Command {
     SendFile {
         /// Path of the file to be sent
         local_path: PathBuf,
-        /// Address or hostname of the remote
-        remote: String,
         /// Path of the file in the remote
-        remote_path: OsString,
+        remote_path: String,
         mode: CreateFileMode,
     },
     /// Append to a file
@@ -207,4 +209,24 @@ where
         .find('=')
         .ok_or_else(|| format!("invalid KEY=value: no `=` found in `{s}`"))?;
     Ok((s[..pos].parse()?, s[pos + 1..].parse()?))
+}
+
+impl Command {
+    pub fn to_command_number(&self) -> u8 {
+        match self {
+            Command::Run { .. } => 0,
+            Command::RunShell { .. } => 1,
+            Command::SetEnv { .. } => 2,
+            Command::RmEnv { .. } => 3,
+            Command::RunReceived { .. } => 4,
+            Command::CreateDir { .. } => 5,
+            Command::SendFile { .. } => 6,
+            Command::AppendToFile { .. } => 7,
+            Command::AppendToReceived { .. } => 8,
+            Command::Rename { .. } => 9,
+            Command::Move { .. } => 10,
+            Command::CreateLink { .. } => 11,
+            Command::Delete { .. } => 12,
+        }
+    }
 }
