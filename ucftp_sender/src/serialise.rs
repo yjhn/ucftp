@@ -20,6 +20,7 @@ impl BufSerialise for u64 {
         let bytes = self.to_le_bytes();
         if self <= SER_BYTE_MAX as u64 {
             buf.push(bytes[0]);
+            return;
         }
 
         // Calculate number of bytes used to represent a number
@@ -92,12 +93,17 @@ impl BufSerialise for &[(String, String)] {
     }
 }
 
+/// Append little-endian bytes of val to buf
+pub fn dump_le(buf: &mut Vec<u8>, val: u64) {
+    buf.extend_from_slice(&val.to_le_bytes());
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::net_encode::{BufDeserialise, BufSerialise};
+    use crate::serialise::{BufDeserialise, BufSerialise};
 
     fn serde<S: BufSerialise, D: BufDeserialise>(val: S) -> D {
-        let mut buf = [0; 100_100];
+        let mut buf = Vec::with_capacity(1000);
         val.serialise_to_buf(&mut buf);
         <D as BufDeserialise>::deserialise_from_buf(&buf).1
     }

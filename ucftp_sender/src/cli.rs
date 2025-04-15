@@ -1,22 +1,32 @@
-use std::{error::Error, ffi::OsString, path::PathBuf, str::FromStr};
+use std::{error::Error, net::Ipv4Addr, path::PathBuf, str::FromStr};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+/// Unidirectional Command and File Transfer Protocol CLI.
+/// Send commands and data to a remote machine.
 #[derive(Debug, Parser)]
 #[command(name = "scftp")]
 #[command(arg_required_else_help = true)]
 pub struct Cli {
-    /// Address or hostname of the remote
-    pub remote: String,
+    /// IPv4 address of the remote
+    // #[clap(global = true)] // does not work with required args
+    pub remote_ip: Ipv4Addr,
     #[command(subcommand)]
     pub command: Command,
     /// Conditionally execute current command if the command of the provided
     /// session ID has not been executed or has failed
-    #[arg(long)]
-    pub unless: Option<u64>,
-    /// Commands that must be executed before this one
-    #[arg(long)]
-    pub after: Vec<u64>,
+    #[arg(long = "usid", short = 'u')]
+    pub unless_session_id: Option<u64>,
+    /// Time (in ms) to wait for command with provided session ID to be executed
+    #[arg(long = "uwt", requires = "unless_session_id")]
+    pub unless_wait: Option<u32>,
+    /// Session IDs of commands that must be executed before this one
+    #[arg(long = "asid", short = 'a')]
+    pub after_session_ids: Vec<u64>,
+    /// Time (in ms) to wait for other commands to be executed before executing
+    /// this one
+    #[arg(long = "awt", requires = "after_session_ids")]
+    pub after_wait: Option<u32>,
 }
 
 /// Protocol capabilities
