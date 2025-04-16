@@ -1,4 +1,7 @@
 use clap::Parser;
+use hpke::aead::AesGcm128;
+use hpke::kdf::HkdfSha256;
+use hpke::kem::X25519HkdfSha256;
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -8,7 +11,6 @@ use std::net::Ipv4Addr;
 use std::net::SocketAddrV4;
 use std::net::UdpSocket;
 use std::time;
-use std::time::Duration;
 
 use message::UnlessAfter;
 use message::serialise_message;
@@ -26,7 +28,7 @@ const SAFE_IP4_PACKET_SIZE: u16 = 1280 - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
 const PROTOCOL_IDENTIFIER: &[u8; 6] = b"UCFTP\x01";
 // TODO: FEC packets
 pub enum PacketType {
-    // FirstData = 0,
+    // FirstData = 0, - first packet is already indicated by protocol identifier
     RegularData = 1,
     LastData,
 }
@@ -36,11 +38,9 @@ fn protocol_time() -> u32 {
     // It is not monotonic, which is not ideal
     // Implementation from:
     // https://github.com/jedisct1/rust-coarsetime/blob/0.1.36/src/clock.rs#L84
-    let unix_ts_now_sys = time::SystemTime::now()
+    let unix_ts_now = time::SystemTime::now()
         .duration_since(time::UNIX_EPOCH)
         .expect("The system clock is not properly set");
-
-    let unix_ts_now = Duration::from(unix_ts_now_sys);
 
     (unix_ts_now.as_secs() - PROTOCOL_TIME_UNIX_EPOCH_OFFSET as u64) as u32
 }
@@ -137,6 +137,12 @@ impl<R: Rng> PacketIter<R> {
     }
 }
 
+type Kem = X25519HkdfSha256;
+type Aead = AesGcm128;
+type Kdf = HkdfSha256;
+
+// fn crypto_init() ->
+
 fn main() {
     let cli::Cli {
         remote_ip,
@@ -156,6 +162,8 @@ fn main() {
             after_wait,
         },
     );
+
+    // println!("{}", protocol_time());
 
     let mut rng = SmallRng::from_os_rng();
 
