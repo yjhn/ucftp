@@ -2,6 +2,10 @@ use std::{error::Error, net::Ipv4Addr, path::PathBuf, str::FromStr};
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+const UDP_HEADER_SIZE: u16 = 8;
+const IP4_HEADER_SIZE: u16 = 20;
+const SAFE_IP4_PACKET_SIZE: u16 = 1280 - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
+
 /// Unidirectional Command and File Transfer Protocol CLI.
 /// Send commands and data to a remote machine.
 #[derive(Debug, Parser)]
@@ -27,6 +31,16 @@ pub struct Cli {
     /// this one
     #[arg(long = "awt", requires = "after_session_ids")]
     pub after_wait: Option<u32>,
+    /// Packet size to use. IP + UDP heaeders included
+    #[arg(short = 'p', default_value_t = SAFE_IP4_PACKET_SIZE)]
+    pub packet_size: u16,
+    /// Directory where the keys are stored. Key must be named sender_sk.pem
+    /// sender_pk.pem for secret (private) and public keys respectively
+    #[arg(short = 'k')]
+    pub sender_keys_dir: Option<PathBuf>,
+    /// File containing the receiver public key
+    #[arg(short = 'r')]
+    pub receiver_pk_file: Option<PathBuf>,
 }
 
 /// Protocol capabilities
