@@ -544,15 +544,20 @@ version = "0.1.0"
 name = "ucftp_sender"
 version = "0.1.0"
 dependencies = [
- "base64",
  "clap",
  "hpke",
  "rand",
+ "ucftp_shared",
 ]
 
 [[package]]
 name = "ucftp_shared"
 version = "0.1.0"
+dependencies = [
+ "base64",
+ "hpke",
+ "rand_core 0.9.3",
+]
 
 [[package]]
 name = "unicode-ident"

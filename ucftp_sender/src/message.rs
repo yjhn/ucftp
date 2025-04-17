@@ -4,8 +4,7 @@ use std::io::Read;
 use std::path::Path;
 
 use crate::cli::Command;
-use crate::serialise::BufSerialise;
-use crate::serialise::dump_le;
+use ucftp_shared::serialise::{BufSerialise, dump_le};
 
 pub struct UnlessAfter {
     pub unless_session_id: Option<u64>,
