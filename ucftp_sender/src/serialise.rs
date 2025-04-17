@@ -1,4 +1,3 @@
-pub const SER_ZERO: u8 = 0;
 pub const SER_BYTE_MAX: u8 = 247;
 
 pub trait BufSerialise {

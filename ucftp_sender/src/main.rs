@@ -45,14 +45,10 @@ const PROTOCOL_INFO: &[u8] = b"UCFTP";
 // TODO(thesis): mention these sizes
 const _: () = if size_of::<EncappedKey>() != 32 {
     panic!()
-} else {
-    ()
 };
 
 const _: () = if size_of::<hpke::aead::AeadTag<AesGcm128>>() != 16 {
     panic!()
-} else {
-    ()
 };
 
 // TODO: FEC packets
@@ -74,11 +70,10 @@ fn protocol_time() -> u32 {
     (unix_ts_now.as_secs() - PROTOCOL_TIME_UNIX_EPOCH_OFFSET as u64) as u32
 }
 
-pub struct PacketIter<R: CryptoRng> {
+pub struct PacketIter {
     session_id: u64,
     // actually, u48
     packet_sequence_number: u64,
-    rng: R,
     protocol_message: Vec<u8>,
     protocol_message_used: usize,
     crypto_ctx: AeadCtxS<ChosenAead, ChosenKdf, ChosenKem>,
@@ -91,9 +86,9 @@ pub struct PacketIter<R: CryptoRng> {
 // TODO: FEC as an extension?
 pub struct SessionExtensions {}
 
-impl<R: CryptoRng> PacketIter<R> {
+impl PacketIter {
     pub fn new(
-        mut rng: R,
+        rng: &mut impl CryptoRng,
         protocol_message: Vec<u8>,
         crypto_ctx: AeadCtxS<ChosenAead, ChosenKdf, ChosenKem>,
         encapped_key: EncappedKey,
@@ -105,7 +100,6 @@ impl<R: CryptoRng> PacketIter<R> {
         Self {
             session_id,
             packet_sequence_number: 0,
-            rng,
             protocol_message,
             protocol_message_used: 0,
             crypto_ctx,
@@ -204,8 +198,6 @@ fn main() {
         },
     );
 
-    // println!("{}", protocol_time());
-
     let mut rng = StdRng::from_os_rng();
     let sock = bind_socket(&mut rng);
 
@@ -213,7 +205,7 @@ fn main() {
     let (encapped_key, crypto_ctx) =
         init_sender_crypto(&mut rng, sender_sk, sender_pk, receiver_pk);
     let mut packet_iter = PacketIter::new(
-        rng,
+        &mut rng,
         protocol_message,
         crypto_ctx,
         encapped_key,
@@ -233,11 +225,11 @@ fn get_keys(
     receiver_pk_file: Option<PathBuf>,
 ) -> (PrivateKey, PublicKey, PublicKey) {
     let sender_keys_dir = sender_keys_dir.unwrap_or_else(|| PathBuf::from_str(".").unwrap());
-    println!("reading sender keys from '{}'", sender_keys_dir.display());
+    eprintln!("reading sender keys from '{}'", sender_keys_dir.display());
     let (sender_sk, sender_pk) = read_sender_keys(sender_keys_dir);
     let receiver_key_file =
         receiver_pk_file.unwrap_or_else(|| PathBuf::from_str("./receiver_pk.pem").unwrap());
-    println!(
+    eprintln!(
         "reading receiver public key from '{}'",
         receiver_key_file.display()
     );
@@ -269,13 +261,13 @@ fn read_sender_keys(mut dir: PathBuf) -> (PrivateKey, PublicKey) {
 fn parse_sk(pem: &str) -> PrivateKey {
     let mut buf = [0; 48];
     decode_pem_line(pem, &mut buf);
-    PrivateKey::from_bytes(&mut buf[16..]).unwrap()
+    PrivateKey::from_bytes(&buf[16..]).unwrap()
 }
 
 fn parse_pk(pem: &str) -> PublicKey {
     let mut buf = [0; 44];
     decode_pem_line(pem, &mut buf);
-    PublicKey::from_bytes(&mut buf[12..]).unwrap()
+    PublicKey::from_bytes(&buf[12..]).unwrap()
 }
 
 fn decode_pem_line(pem: &str, buf: &mut [u8]) {

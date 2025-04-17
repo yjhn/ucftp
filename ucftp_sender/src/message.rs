@@ -25,7 +25,7 @@ pub fn serialise_message(command: &Command, ua: UnlessAfter) -> Vec<u8> {
     let mut com_enc = MessageCommandEncoder::new(buf);
     com_enc.encode_command(command);
 
-    com_enc.to_buf()
+    com_enc.into_buf()
 }
 
 fn encode_message_metadata(buf: &mut Vec<u8>, ua: UnlessAfter) {
@@ -56,7 +56,7 @@ impl MessageCommandEncoder {
         MessageCommandEncoder { buf }
     }
 
-    pub fn to_buf(self) -> Vec<u8> {
+    pub fn into_buf(self) -> Vec<u8> {
         self.buf
     }
 
