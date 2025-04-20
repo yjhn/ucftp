@@ -97,6 +97,32 @@ pub fn dump_le(buf: &mut Vec<u8>, val: u64) {
     buf.extend_from_slice(&val.to_le_bytes());
 }
 
+/// Extract val from first 8 bytes of buf
+pub fn u64_from_le_bytes(buf: &[u8]) -> u64 {
+    let arr = *buf.first_chunk::<8>().unwrap();
+    u64::from_le_bytes(arr)
+}
+
+/// Extract val from first 4 bytes of buf
+pub fn u32_from_le_bytes(buf: &[u8]) -> u32 {
+    let arr = *buf.first_chunk::<4>().unwrap();
+    u32::from_le_bytes(arr)
+}
+
+/// Extracts 6 little-endian bytes from buffer
+pub fn seq_deser(buf: &[u8]) -> u64 {
+    let mut arr = [0; 8];
+    arr[0] = buf[0];
+    arr[1] = buf[1];
+    arr[2] = buf[2];
+    arr[3] = buf[3];
+    arr[4] = buf[4];
+    arr[5] = buf[5];
+    arr[6] = 0;
+    arr[7] = 0;
+    u64::from_le_bytes(arr)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::serialise::{BufDeserialise, BufSerialise};

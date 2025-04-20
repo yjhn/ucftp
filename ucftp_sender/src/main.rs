@@ -6,6 +6,7 @@ use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
+use ucftp_shared::serialise::dump_le;
 use ucftp_shared::*;
 
 use std::cmp::min;
@@ -35,9 +36,6 @@ pub struct PacketIter {
     packet_buffer: Vec<u8>,
 }
 
-// TODO: FEC as an extension?
-pub struct SessionExtensions {}
-
 impl PacketIter {
     pub fn new(
         rng: &mut impl CryptoRng,
@@ -62,33 +60,35 @@ impl PacketIter {
         }
     }
 
+    // TODO(thesis): include total session plaintext length as the first session field
     fn fill_packet(&mut self) {
         // Session ID
-        self.session_id.serialise_to_buf(&mut self.packet_buffer);
+        dump_le(&mut self.packet_buffer, self.session_id);
         // Packet sequence number is a u48 stored in u64
         self.packet_buffer
-            .extend_from_slice(&0u64.to_le_bytes()[..6]);
+            .extend_from_slice(&self.packet_sequence_number.to_le_bytes()[..6]);
         self.packet_sequence_number += 1;
         // Length depends on body length
-        let packet_overhead = self.packet_buffer.len() as u16 + 2 + 4 + 16;
+        let packet_overhead = self.packet_buffer.len() as u16 + 4 + 16;
         let body_len = min(
-            self.protocol_message.len(),
+            self.protocol_message.len() - self.protocol_message_used,
             (self.packet_size - packet_overhead) as usize,
         );
-        let len: u16 = body_len as u16 + packet_overhead;
-        self.packet_buffer.extend_from_slice(&len.to_le_bytes());
+        // let len: u16 = body_len as u16 + packet_overhead;
+        // self.packet_buffer.extend_from_slice(&len.to_le_bytes());
         let aad_end = self.packet_buffer.len();
         // Send time. TODO(thesis): do we really need to encrypt the time?
         let t: u32 = protocol_time();
         self.packet_buffer.extend_from_slice(&t.to_le_bytes());
-        // Body
+        // Body. Encryption works in-place, so we first write plaintext data to
+        // the buffer and then encrypt it
         self.packet_buffer.extend_from_slice(
             &self.protocol_message
                 [self.protocol_message_used..self.protocol_message_used + body_len],
         );
+        self.protocol_message_used += body_len;
         let (aad, data) = self.packet_buffer.split_at_mut(aad_end);
         let auth_tag = self.crypto_ctx.seal_in_place_detached(data, aad).unwrap();
-        self.protocol_message_used += body_len;
         // Auth tag
         let data_end = self.packet_buffer.len();
         for _ in 0..16u8 {
@@ -106,7 +106,6 @@ impl PacketIter {
             // First packet
             // Protocol identifier
             self.packet_buffer.extend_from_slice(PROTOCOL_IDENTIFIER);
-            // TODO: key exchange data
             let start_idx = self.packet_buffer.len();
             for _ in 0..size_of::<EncappedKey>() {
                 self.packet_buffer.push(0);
@@ -155,7 +154,7 @@ fn main() {
 
     let (sender_sk, sender_pk, receiver_pk) = get_keys(sender_keys_dir, receiver_pk_file);
     let (encapped_key, crypto_ctx) =
-        init_sender_crypto(&mut rng, sender_sk, sender_pk, receiver_pk);
+        init_sender_crypto(&mut rng, sender_sk, sender_pk, &receiver_pk);
     let mut packet_iter = PacketIter::new(
         &mut rng,
         protocol_message,

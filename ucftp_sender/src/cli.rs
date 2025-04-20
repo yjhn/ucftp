@@ -1,9 +1,8 @@
 use std::{error::Error, net::Ipv4Addr, path::PathBuf, str::FromStr};
 
 use clap::{Parser, Subcommand, ValueEnum};
+use ucftp_shared::{IP4_HEADER_SIZE, UDP_HEADER_SIZE};
 
-const UDP_HEADER_SIZE: u16 = 8;
-const IP4_HEADER_SIZE: u16 = 20;
 const SAFE_IP4_PACKET_SIZE: u16 = 1280 - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
 
 /// Unidirectional Command and File Transfer Protocol CLI.

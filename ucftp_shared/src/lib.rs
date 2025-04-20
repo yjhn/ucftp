@@ -4,7 +4,10 @@ use std::time;
 
 use base64::engine::{Engine, general_purpose::STANDARD as BASE64_STANDARD};
 use hpke::Deserializable;
+use hpke::HpkeError;
+use hpke::OpModeR;
 use hpke::OpModeS;
+use hpke::aead::AeadCtxR;
 use hpke::aead::AeadCtxS;
 use hpke::aead::AesGcm128;
 use hpke::kdf::HkdfSha256;
@@ -17,6 +20,8 @@ pub const PROTOCOL_IDENTIFIER: &[u8; 6] = b"UCFTP\x01";
 pub const PROTOCOL_INFO: &[u8] = b"UCFTP";
 pub const PROTOCOL_TIME_UNIX_EPOCH_OFFSET: u32 = 1735689600;
 pub const RECEIVER_PORT: u16 = 4321;
+pub const UDP_HEADER_SIZE: u16 = 8;
+pub const IP4_HEADER_SIZE: u16 = 20;
 
 pub type ChosenKem = X25519HkdfSha256;
 pub type PrivateKey = <ChosenKem as hpke::Kem>::PrivateKey;
@@ -34,11 +39,34 @@ const _: () = if size_of::<hpke::aead::AeadTag<AesGcm128>>() != 16 {
     panic!()
 };
 
+// TODO: FEC as an extension?
+pub struct SessionExtensions {}
+
+impl SessionExtensions {
+    pub fn empty() -> Self {
+        SessionExtensions {}
+    }
+}
+
 // TODO: FEC packets
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketType {
-    // FirstData = 0, - first packet is already indicated by protocol identifier
+    FirstData = 0, // - first packet is indicated by protocol identifier
     RegularData = 1,
     LastData,
+}
+
+impl TryFrom<u8> for PacketType {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            b'U' => Ok(PacketType::FirstData),
+            1 => Ok(PacketType::RegularData),
+            2 => Ok(PacketType::LastData),
+            _ => Err(()),
+        }
+    }
 }
 
 pub fn protocol_time() -> u32 {
@@ -86,10 +114,23 @@ pub fn init_sender_crypto(
     rng: &mut impl CryptoRng,
     sender_sk: PrivateKey,
     sender_pk: PublicKey,
-    receiver_pk: PublicKey,
+    receiver_pk: &PublicKey,
 ) -> (EncappedKey, AeadCtxS<ChosenAead, ChosenKdf, ChosenKem>) {
     let opmode = OpModeS::Auth((sender_sk, sender_pk));
-    hpke::setup_sender(&opmode, &receiver_pk, PROTOCOL_INFO, rng).unwrap()
+    hpke::setup_sender(&opmode, receiver_pk, PROTOCOL_INFO, rng).unwrap()
+}
+
+/// The only possible error variant is HpkeError::DecapError
+pub fn try_decapsulate_key(
+    sender_pk: PublicKey,
+    receiver_sk: &PrivateKey,
+    encapped_key: &EncappedKey,
+) -> Option<AeadCtxR<ChosenAead, ChosenKdf, ChosenKem>> {
+    let opmode = OpModeR::Auth(sender_pk);
+    match hpke::setup_receiver(&opmode, receiver_sk, encapped_key, PROTOCOL_INFO) {
+        Ok(c) => Some(c),
+        Err(_) => None,
+    }
 }
 
 #[cfg(test)]
