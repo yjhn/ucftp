@@ -5,11 +5,10 @@ use std::net::UdpSocket;
 
 use hpke::Deserializable;
 use hpke::HpkeError;
+use hpke::aead::AeadCtxR;
 use hpke::aead::AeadTag;
 use hpke::aead::AesGcm128;
-use ucftp_shared::serialise::seq_deser;
-use ucftp_shared::serialise::u32_from_le_bytes;
-use ucftp_shared::serialise::u64_from_le_bytes;
+use ucftp_shared::serialise::*;
 use ucftp_shared::*;
 
 // Equipment that allows frames larger than 9216 bytes is very rare
@@ -32,6 +31,8 @@ const MIN_PACKET_LEN: u16 = 1 // packet type
 
 // Packet timeout = 4000 seconds
 const MAX_ALLOWED_ABS_TIME_DIFF: u32 = 4000;
+
+type CryptoCtx = AeadCtxR<ChosenAead, ChosenKdf, ChosenKem>;
 
 // Architecture:
 // - main loop listens on net interface
@@ -75,7 +76,7 @@ struct EncryptedPacket {
 }
 
 impl EncryptedPacket {
-    fn try_from(packet: &[u8], p_type: PacketType) -> Result<Self, PacketError> {
+    fn try_from_buf(packet: &[u8], p_type: PacketType) -> Result<Self, PacketError> {
         debug_assert_ne!(p_type, PacketType::FirstData);
         debug_assert!(packet.len() >= MIN_PACKET_LEN as usize);
         let mut packet_used = 0;
@@ -103,6 +104,44 @@ impl EncryptedPacket {
             session_id,
         })
     }
+
+    // This will corrupt the packet's buffer, so the packet will become useless
+    // either way
+    fn try_decrypt(
+        mut self,
+        crypto_ctx: &mut CryptoCtx,
+        buf: &mut Vec<u8>,
+    ) -> Result<u32, PacketError> {
+        // Recreate AAD, structure:
+        // - packet type
+        // - session ID
+        // - sequence number
+        // use buf as scratch space
+        buf.push(self.packet_type as u8);
+        dump_le(buf, self.session_id);
+        // Packet sequence number is a u48 stored in u64
+        buf.extend_from_slice(&self.sequence_number.to_le_bytes()[..6]);
+
+        match crypto_ctx.open_in_place_detached(
+            &mut self.encrypted_data,
+            &buf[buf.len() - 15..],
+            &self.auth_tag,
+        ) {
+            Ok(_) => {
+                // Clean up AAD
+                buf.truncate(buf.len() - 15);
+                // Caller must check for timeout
+                let time = u32_from_le_bytes(&self.encrypted_data);
+                buf.extend_from_slice(&self.encrypted_data[4..]);
+                Ok(time)
+            }
+            Err(e) => {
+                // Clean up AAD
+                buf.truncate(buf.len() - 15);
+                Err(PacketError::CryptoErr(e))
+            }
+        }
+    }
 }
 
 struct FirstPacket {
@@ -112,7 +151,7 @@ struct FirstPacket {
     sequence_number: u64,
     send_time: u32,
     decrypted_data: Vec<u8>,
-    auth_tag: AeadTag<AesGcm128>,
+    crypto_ctx: CryptoCtx,
 }
 
 impl FirstPacket {
@@ -200,10 +239,10 @@ impl FirstPacket {
             sender_pk,
             session_id,
             session_extensions: SessionExtensions::empty(),
-            auth_tag,
             sequence_number,
             decrypted_data,
             send_time,
+            crypto_ctx,
         })
     }
 }
@@ -231,8 +270,11 @@ enum Session {
         // arbitrary value, as long as they will not overflow the counter
         sequence_number_start: u64,
         command_buf: Vec<u8>,
+        // packet sequence ID needed to make progress on decryption
+        seq_to_make_progress: u64,
         out_of_order_packet_buffer: Vec<EncryptedPacket>,
         last_packet_time: u32,
+        crypto_ctx: CryptoCtx,
     },
 }
 
@@ -254,6 +296,8 @@ impl Session {
             command_buf: packet.decrypted_data,
             out_of_order_packet_buffer: Vec::new(),
             last_packet_time: packet.send_time,
+            seq_to_make_progress: packet.sequence_number + 1,
+            crypto_ctx: packet.crypto_ctx,
         }
     }
 
@@ -279,6 +323,13 @@ impl Session {
             } => {
                 debug_assert_eq!(*session_id, packet.session_id);
                 debug_assert!(protocol_time() - *init_time < 35);
+                // Sort packets by sequence number
+                packet_buf.sort_unstable_by(|a, b| a.sequence_number.cmp(&b.sequence_number));
+                // Try decrypting pending packets if possible
+                if packet_buf[0].sequence_number == packet.sequence_number + 1 {
+                    todo!()
+                }
+
                 *self = Session::InProgress {
                     sender_pk: packet.sender_pk,
                     session_id: *session_id,
@@ -287,6 +338,8 @@ impl Session {
                     command_buf: packet.decrypted_data,
                     out_of_order_packet_buffer: mem::take(packet_buf),
                     last_packet_time: packet.send_time,
+                    seq_to_make_progress: packet.sequence_number + 1,
+                    crypto_ctx: packet.crypto_ctx,
                 }
             }
             Session::InProgress { .. } => {
@@ -299,18 +352,76 @@ impl Session {
         }
     }
 
-    fn timeout(&self, t: u32) -> bool {
+    /// Checks if timeout of packet send time occured
+    fn packet_send_timeout(&self, t: u32) -> bool {
+        let progress_time = self.progress_time();
+        // Protect against bad values
+        if progress_time > t {
+            false
+        } else {
+            // Progress must be made at least every 30s
+            t - progress_time > 30
+        }
+    }
+
+    /// Checks if timeout of packet receive time occured
+    fn packet_receive_timeout(&self, t: u32) -> bool {
+        let progress_time = self.progress_time();
+        // Protect against bad values
+        if progress_time > t {
+            false
+        } else {
+            // Progress must be made at least every 30s
+            t - progress_time > 40
+        }
+    }
+
+    /// Time last progress was made, which can be:
+    /// - valid session init packet
+    /// - successful packet decryption
+    fn progress_time(&self) -> u32 {
         match self {
-            Session::Uninit { init_time, .. } => {
-                // Session init packet must arrive no later than 30s after
-                // first received packet
-                t - *init_time > 30
-            }
+            Session::Uninit { init_time, .. } => *init_time,
             Session::InProgress {
                 last_packet_time, ..
+            } => *last_packet_time,
+        }
+    }
+
+    fn add_packet(&mut self, packet: EncryptedPacket) {
+        debug_assert_eq!(self.session_id(), packet.session_id);
+        debug_assert!(!(protocol_time() - self.progress_time() > 45));
+        match self {
+            Session::Uninit { packet_buf, .. } => {
+                packet_buf.push(packet);
+            }
+            Session::InProgress {
+                sequence_number_start,
+                command_buf,
+                out_of_order_packet_buffer,
+                last_packet_time,
+                seq_to_make_progress,
+                crypto_ctx,
+                ..
             } => {
-                // Progress must be made at least every 30s
-                t - *last_packet_time > 30
+                // Try decrypt
+                if packet.sequence_number == *seq_to_make_progress {
+                    let len_before = command_buf.len();
+                    match packet.try_decrypt(crypto_ctx, command_buf) {
+                        Ok(time) => {
+                            todo!()
+                            // if self.packet_send_timeout(time) {
+                            //     // Discard the packet
+                            //     command_buf.truncate(len_before);
+                            // } else {
+                            //     *seq_to_make_progress += 1;
+                            // }
+                        }
+                        Err(e) => eprintln!(" - packet decryption error: {:?}", e),
+                    }
+                } else {
+                    out_of_order_packet_buffer.push(packet);
+                }
             }
         }
     }
@@ -349,7 +460,7 @@ impl Receiver {
     }
 
     fn receive_loop(&mut self) {
-        'packet_rx: loop {
+        loop {
             let (len, addr) = self.socket.recv_from(&mut self.packet_buf).unwrap();
             eprint!("packet from {}", addr);
 
@@ -373,6 +484,9 @@ impl Receiver {
             };
             match packet_type {
                 PacketType::FirstData => {
+                    // TODO(refactor): don't decrypt the packet,
+                    // hand it over immediately to the session, it will know
+                    // whether it is worth decrypting
                     if self.packet_buf.len() < MIN_FIRST_PACKET_LEN as usize {
                         eprintln!(" - packet too short: {}", self.packet_buf.len());
                         continue;
@@ -391,7 +505,7 @@ impl Receiver {
                     let mut insert = None;
                     for s in self.sessions.iter_mut() {
                         if s.session_id() == first_packet.session_id() {
-                            if s.timeout(first_packet.send_time) {
+                            if s.packet_send_timeout(first_packet.send_time) {
                                 eprintln!(
                                     " - session timeout occured, putting packet in a new session"
                                 );
@@ -413,10 +527,9 @@ impl Receiver {
                         eprintln!(" - packet too short: {}", self.packet_buf.len());
                         continue;
                     }
-                    let first_packet = match FirstPacket::try_from_buf(
+                    let packet = match EncryptedPacket::try_from_buf(
                         &mut self.packet_buf[1..],
-                        &self.sender_pks,
-                        &self.receiver_sk,
+                        PacketType::RegularData,
                     ) {
                         Ok(p) => p,
                         Err(e) => {
@@ -424,11 +537,28 @@ impl Receiver {
                             continue;
                         }
                     };
+                    let mut insert = None;
                     for s in self.sessions.iter_mut() {
-                        if s.session_id() == first_packet.session_id() {
-                            s.add_first_packet(first_packet);
+                        if s.session_id() == packet.session_id {
+                            // TODO(thesis): what to do if timeout occured:
+                            // - put in a new session
+                            // - discard packet
+                            // - discard old session and put packet in new
+                            if s.packet_receive_timeout(protocol_time()) {
+                                eprintln!(
+                                    " - session timeout occured, putting packet in a new session"
+                                );
+                                // Put it in a new session
+                                insert = Some(Session::from_middle_packet(packet));
+                                break;
+                            }
+                            s.add_packet(packet);
                             break;
                         }
+                    }
+                    match insert {
+                        Some(s) => self.sessions.push(s),
+                        None => (),
                     }
                 }
                 PacketType::LastData => {
@@ -436,6 +566,7 @@ impl Receiver {
                         eprintln!(" - packet too short: {}", self.packet_buf.len());
                         continue;
                     }
+                    todo!();
                 }
             }
         }
