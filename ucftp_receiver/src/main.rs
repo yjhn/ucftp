@@ -34,6 +34,15 @@ const MAX_ALLOWED_ABS_TIME_DIFF: u32 = 4000;
 
 type CryptoCtx = AeadCtxR<ChosenAead, ChosenKdf, ChosenKem>;
 
+fn packet_timeout(t: u32) -> bool {
+    let time = protocol_time();
+    if t > time {
+        false
+    } else {
+        time - t > MAX_ALLOWED_ABS_TIME_DIFF
+    }
+}
+
 // Architecture:
 // - main loop listens on net interface
 // - when a packet arrives:
@@ -225,10 +234,9 @@ impl FirstPacket {
             Err(e) => return Err(PacketError::CryptoErr(e)),
         }
 
-        let current_time = protocol_time();
         let send_time = u32_from_le_bytes(&packet[packet_used..]);
         packet_used += 4;
-        if send_time.abs_diff(current_time) > MAX_ALLOWED_ABS_TIME_DIFF {
+        if packet_timeout(send_time) {
             return Err(PacketError::TooOld);
         }
 
@@ -247,48 +255,105 @@ impl FirstPacket {
     }
 }
 
-enum Session {
-    // Session without first packet
-    Uninit {
-        session_id: u64,
-        // No packets can be decrypted without the first packet
-        packet_buf: Vec<EncryptedPacket>,
-        // Packet send time is encrypted. Even if it was not encrypted, we
-        // could not trust it, because we can't verify its correctness until
-        // we get the first packet. So the timeout logic in this case works
-        // as follows: first session packet must arrive within 30 seconds of the
-        // first received packet. Otherwise this session is discarded
-        init_time: u32,
-    },
-    // Only one session initiation packet will be supplied for one session
-    InProgress {
-        sender_pk: PublicKey,
-        session_id: u64,
-        session_extensions: SessionExtensions,
-        // sequence number of first packet is always 0 - TODO(thesis): it is
-        // probably a good idea to allow packet numbers to start from
-        // arbitrary value, as long as they will not overflow the counter
-        sequence_number_start: u64,
-        command_buf: Vec<u8>,
-        // packet sequence ID needed to make progress on decryption
-        seq_to_make_progress: u64,
-        out_of_order_packet_buffer: Vec<EncryptedPacket>,
-        last_packet_time: u32,
-        crypto_ctx: CryptoCtx,
-    },
+struct UninitSession {
+    session_id: u64,
+    // No packets can be decrypted without the first packet
+    packet_buf: Vec<EncryptedPacket>,
+    // Packet send time is encrypted. Even if it was not encrypted, we
+    // could not trust it, because we can't verify its correctness until
+    // we get the first packet. So the timeout logic in this case works
+    // as follows: first session packet must arrive within 30 seconds of the
+    // first received packet. Otherwise this session is discarded
+    init_time: u32,
 }
 
-impl Session {
+impl UninitSession {
     fn from_middle_packet(packet: EncryptedPacket) -> Self {
-        Session::Uninit {
+        UninitSession {
             session_id: packet.session_id,
             packet_buf: vec![packet],
             init_time: protocol_time(),
         }
     }
 
+    fn session_id(&self) -> u64 {
+        self.session_id
+    }
+
+    // Add first packet to this session.
+    // Preconditions:
+    // - session ID must match
+    // - timeout for first packet receive must not have passed
+    fn add_first_packet(mut self, packet: FirstPacket) -> InProgressSession {
+        // Moving owned non-copiable values between enum variants:
+        // https://rust-unofficial.github.io/patterns/idioms/mem-replace.html
+        debug_assert_eq!(self.session_id, packet.session_id);
+        debug_assert!(protocol_time() - self.init_time < 35);
+        // Sort packets by sequence number
+        self.packet_buf
+            .sort_unstable_by(|a, b| a.sequence_number.cmp(&b.sequence_number));
+        // Try decrypting pending packets if possible
+        if self.packet_buf[0].sequence_number == packet.sequence_number + 1 {
+            todo!()
+        }
+
+        InProgressSession {
+            sender_pk: packet.sender_pk,
+            session_id: self.session_id,
+            session_extensions: packet.session_extensions,
+            sequence_number_start: packet.sequence_number,
+            command_buf: packet.decrypted_data,
+            out_of_order_packet_buffer: self.packet_buf,
+            last_packet_time: packet.send_time,
+            seq_to_make_progress: packet.sequence_number + 1,
+            crypto_ctx: packet.crypto_ctx,
+        }
+    }
+
+    /// Checks if progress timeout has occured. More specifically,
+    /// progress means packet decryption.
+    /// Progress must be made at least every 40s
+    fn progress_timeout(&self) -> bool {
+        let t = protocol_time();
+        // Protect against bad values
+        if self.init_time > t {
+            false
+        } else {
+            t - self.init_time > 40
+        }
+    }
+
+    /// Time first packet for this session arrived
+    fn progress_time(&self) -> u32 {
+        self.init_time
+    }
+
+    fn add_packet(&mut self, packet: EncryptedPacket) {
+        debug_assert_eq!(self.session_id(), packet.session_id);
+        debug_assert!(!(protocol_time() - self.progress_time() > 45));
+        self.packet_buf.push(packet);
+    }
+}
+
+struct InProgressSession {
+    sender_pk: PublicKey,
+    session_id: u64,
+    session_extensions: SessionExtensions,
+    // sequence number of first packet is always 0 - TODO(thesis): it is
+    // probably a good idea to allow packet numbers to start from
+    // arbitrary value, as long as they will not overflow the counter
+    sequence_number_start: u64,
+    command_buf: Vec<u8>,
+    // packet sequence ID needed to make progress on decryption
+    seq_to_make_progress: u64,
+    out_of_order_packet_buffer: Vec<EncryptedPacket>,
+    last_packet_time: u32,
+    crypto_ctx: CryptoCtx,
+}
+
+impl InProgressSession {
     fn from_first_packet(packet: FirstPacket) -> Self {
-        Session::InProgress {
+        InProgressSession {
             sender_pk: packet.sender_pk,
             session_id: packet.sequence_number,
             session_extensions: packet.session_extensions,
@@ -302,127 +367,48 @@ impl Session {
     }
 
     fn session_id(&self) -> u64 {
-        match self {
-            Session::Uninit { session_id, .. } => *session_id,
-            Session::InProgress { session_id, .. } => *session_id,
-        }
+        self.session_id
     }
 
-    // Add first packet to this session.
-    // Preconditions:
-    // - session ID must match
-    // - timeout for first packet receive must not have passed
-    fn add_first_packet(&mut self, packet: FirstPacket) {
-        // Moving owned non-copiable values between enum variants:
-        // https://rust-unofficial.github.io/patterns/idioms/mem-replace.html
-        match self {
-            Session::Uninit {
-                session_id,
-                packet_buf,
-                init_time,
-            } => {
-                debug_assert_eq!(*session_id, packet.session_id);
-                debug_assert!(protocol_time() - *init_time < 35);
-                // Sort packets by sequence number
-                packet_buf.sort_unstable_by(|a, b| a.sequence_number.cmp(&b.sequence_number));
-                // Try decrypting pending packets if possible
-                if packet_buf[0].sequence_number == packet.sequence_number + 1 {
-                    todo!()
-                }
-
-                *self = Session::InProgress {
-                    sender_pk: packet.sender_pk,
-                    session_id: *session_id,
-                    session_extensions: packet.session_extensions,
-                    sequence_number_start: packet.sequence_number,
-                    command_buf: packet.decrypted_data,
-                    out_of_order_packet_buffer: mem::take(packet_buf),
-                    last_packet_time: packet.send_time,
-                    seq_to_make_progress: packet.sequence_number + 1,
-                    crypto_ctx: packet.crypto_ctx,
-                }
-            }
-            Session::InProgress { .. } => {
-                // TODO: deal with duplicate session IDs
-                eprintln!(
-                    " duplicate session init packet received for session {}",
-                    packet.session_id
-                );
-            }
-        }
-    }
-
-    /// Checks if timeout of packet send time occured
-    fn packet_send_timeout(&self, t: u32) -> bool {
-        let progress_time = self.progress_time();
+    /// Checks if progress timeout has occured. More specifically,
+    /// progress means packet decryption.
+    /// Progress must be made at least every 40s
+    fn progress_timeout(&self) -> bool {
+        let t = protocol_time();
         // Protect against bad values
-        if progress_time > t {
+        if self.last_packet_time > t {
             false
         } else {
-            // Progress must be made at least every 30s
-            t - progress_time > 30
+            t - self.last_packet_time > 40
         }
     }
 
-    /// Checks if timeout of packet receive time occured
-    fn packet_receive_timeout(&self, t: u32) -> bool {
-        let progress_time = self.progress_time();
-        // Protect against bad values
-        if progress_time > t {
-            false
-        } else {
-            // Progress must be made at least every 30s
-            t - progress_time > 40
-        }
-    }
-
-    /// Time last progress was made, which can be:
-    /// - valid session init packet
-    /// - successful packet decryption
+    /// Time a packet was last successfully decrypted
     fn progress_time(&self) -> u32 {
-        match self {
-            Session::Uninit { init_time, .. } => *init_time,
-            Session::InProgress {
-                last_packet_time, ..
-            } => *last_packet_time,
-        }
+        self.last_packet_time
     }
 
     fn add_packet(&mut self, packet: EncryptedPacket) {
         debug_assert_eq!(self.session_id(), packet.session_id);
         debug_assert!(!(protocol_time() - self.progress_time() > 45));
-        match self {
-            Session::Uninit { packet_buf, .. } => {
-                packet_buf.push(packet);
-            }
-            Session::InProgress {
-                sequence_number_start,
-                command_buf,
-                out_of_order_packet_buffer,
-                last_packet_time,
-                seq_to_make_progress,
-                crypto_ctx,
-                ..
-            } => {
-                // Try decrypt
-                if packet.sequence_number == *seq_to_make_progress {
-                    let len_before = command_buf.len();
-                    match packet.try_decrypt(crypto_ctx, command_buf) {
-                        Ok(time) => {
-                            todo!()
-                            // if self.packet_send_timeout(time) {
-                            //     // Discard the packet
-                            //     command_buf.truncate(len_before);
-                            // } else {
-                            //     *seq_to_make_progress += 1;
-                            // }
-                        }
-                        Err(e) => eprintln!(" - packet decryption error: {:?}", e),
+        // Try decrypt
+        if packet.sequence_number == self.seq_to_make_progress {
+            let len_before = self.command_buf.len();
+            match packet.try_decrypt(&mut self.crypto_ctx, &mut self.command_buf) {
+                Ok(time) => {
+                    if packet_timeout(time) {
+                        // Discard the packet
+                        self.command_buf.truncate(len_before);
+                        eprintln!(" packet too old")
+                    } else {
+                        self.seq_to_make_progress += 1;
+                        // TODO: try decrypting more packets
                     }
-                } else {
-                    out_of_order_packet_buffer.push(packet);
                 }
+                Err(e) => eprintln!(" - packet decryption error: {:?}", e),
             }
+        } else {
+            self.out_of_order_packet_buffer.push(packet);
         }
     }
 }
@@ -444,7 +430,8 @@ struct Receiver {
     socket: UdpSocket,
     sender_pks: Vec<PublicKey>,
     receiver_sk: PrivateKey,
-    sessions: Vec<Session>,
+    uninit_sessions: Vec<UninitSession>,
+    in_progress_sessions: Vec<InProgressSession>,
     packet_buf: [u8; MAX_PACKET_SIZE as usize],
 }
 
@@ -454,8 +441,9 @@ impl Receiver {
             socket,
             sender_pks,
             receiver_sk,
-            sessions: Vec::new(),
             packet_buf: [0; MAX_PACKET_SIZE as usize],
+            uninit_sessions: Vec::new(),
+            in_progress_sessions: Vec::new(),
         }
     }
 
@@ -503,22 +491,29 @@ impl Receiver {
                         }
                     };
                     let mut insert = None;
-                    for s in self.sessions.iter_mut() {
+                    let mut remove = None;
+                    for (i, s) in self.uninit_sessions.iter_mut().enumerate() {
                         if s.session_id() == first_packet.session_id() {
-                            if s.packet_send_timeout(first_packet.send_time) {
+                            // This is the only place where session timeouts are
+                            // checked. So old sessions will only be discarded when
+                            // a packet arrives with a matching session ID.
+                            if s.progress_timeout() {
                                 eprintln!(
                                     " - session timeout occured, putting packet in a new session"
                                 );
-                                // Put it in a new session
-                                insert = Some(Session::from_first_packet(first_packet));
+                                // Put it in a new session and destroy the old session
+                                insert = Some(InProgressSession::from_first_packet(first_packet));
+                                remove = Some(i);
                                 break;
                             }
-                            s.add_first_packet(first_packet);
                             break;
                         }
                     }
                     match insert {
-                        Some(s) => self.sessions.push(s),
+                        Some(s) => {
+                            self.uninit_sessions.remove(remove.unwrap());
+                            self.in_progress_sessions.push(s)
+                        }
                         None => (),
                     }
                 }
@@ -538,26 +533,29 @@ impl Receiver {
                         }
                     };
                     let mut insert = None;
-                    for s in self.sessions.iter_mut() {
+                    let mut remove = None;
+                    for (i, s) in self.in_progress_sessions.iter_mut().enumerate() {
                         if s.session_id() == packet.session_id {
-                            // TODO(thesis): what to do if timeout occured:
-                            // - put in a new session
-                            // - discard packet
-                            // - discard old session and put packet in new
-                            if s.packet_receive_timeout(protocol_time()) {
+                            // This is the only place where session timeouts are
+                            // checked. So old sessions will only be discarded when
+                            // a packet arrives with a matching session ID.
+                            if s.progress_timeout() {
                                 eprintln!(
                                     " - session timeout occured, putting packet in a new session"
                                 );
-                                // Put it in a new session
-                                insert = Some(Session::from_middle_packet(packet));
+                                // Put it in a new session and destroy the old session
+                                insert = Some(UninitSession::from_middle_packet(packet));
+                                remove = Some(i);
                                 break;
                             }
-                            s.add_packet(packet);
                             break;
                         }
                     }
                     match insert {
-                        Some(s) => self.sessions.push(s),
+                        Some(s) => {
+                            self.in_progress_sessions.remove(remove.unwrap());
+                            self.uninit_sessions.push(s)
+                        }
                         None => (),
                     }
                 }
