@@ -3,8 +3,11 @@ name = "ucftp_shared"
 version = "0.1.0"
 rust-version.workspace = true
 edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [dependencies]
+hpke.workspace = true
 base64 = { version = "0.22.1", default-features = false }
-hpke = { version = "0.13.0", default-features = false, features = ["x25519"] }
 rand_core = "0.9.3"

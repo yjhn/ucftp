@@ -10,3 +10,14 @@ members = [
 rust-version = "1.86"
 edition = "2024"
 license = "AGPL-3.0-or-later"
+authors = ["Andrius Pukšta <andrius.puksta@gmail.com>"]
+repository = "https://github.com/yjhn/ucftp"
+description = "Unidirectional Control and Data Transfer Protocol"
+
+[profile.release]
+lto = "thin"
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
+hpke = { version = "0.13", default-features = false, features = ["x25519"] }
+rand = "0.9.1"
