@@ -18,7 +18,6 @@ use std::str::FromStr;
 
 use message::UnlessAfter;
 use message::serialise_message;
-use serialise::BufSerialise;
 
 mod cli;
 mod message;

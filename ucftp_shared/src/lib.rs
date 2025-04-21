@@ -4,7 +4,6 @@ use std::time;
 
 use base64::engine::{Engine, general_purpose::STANDARD as BASE64_STANDARD};
 use hpke::Deserializable;
-use hpke::HpkeError;
 use hpke::OpModeR;
 use hpke::OpModeS;
 use hpke::aead::AeadCtxR;
@@ -14,6 +13,7 @@ use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
 use rand_core::CryptoRng;
 
+pub mod message;
 pub mod serialise;
 
 pub const PROTOCOL_IDENTIFIER: &[u8; 6] = b"UCFTP\x01";

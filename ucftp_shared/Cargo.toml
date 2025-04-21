@@ -9,5 +9,6 @@ license.workspace = true
 
 [dependencies]
 hpke.workspace = true
+clap.workspace = true
 base64 = { version = "0.22.1", default-features = false }
 rand_core = "0.9.3"

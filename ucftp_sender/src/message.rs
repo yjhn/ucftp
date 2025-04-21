@@ -17,6 +17,9 @@ pub struct UnlessAfter {
 /// serialised protocol message
 pub fn serialise_message(command: &Command, ua: UnlessAfter) -> Vec<u8> {
     let mut buf = Vec::with_capacity(1000);
+    for _ in 0..8 {
+        buf.push(0);
+    }
     // Header
     encode_message_metadata(&mut buf, ua);
 
@@ -24,7 +27,11 @@ pub fn serialise_message(command: &Command, ua: UnlessAfter) -> Vec<u8> {
     let mut com_enc = MessageCommandEncoder::new(buf);
     com_enc.encode_command(command);
 
-    com_enc.into_buf()
+    buf = com_enc.into_buf();
+    // TODO(thesis): include this total message length
+    let len_bytes = (buf.len() as u64).to_le_bytes();
+    buf[..8].copy_from_slice(&len_bytes);
+    buf
 }
 
 fn encode_message_metadata(buf: &mut Vec<u8>, ua: UnlessAfter) {
@@ -33,12 +40,12 @@ fn encode_message_metadata(buf: &mut Vec<u8>, ua: UnlessAfter) {
     buf.push(0);
     if let Some(sid) = ua.unless_session_id {
         buf[flags_idx] |= 0b00000010;
-        (ua.unless_wait.unwrap_or(0) as u64).serialise_to_buf(buf);
-        sid.serialise_to_buf(buf);
+        ua.unless_wait.unwrap_or(0).serialise_to_buf(buf);
+        dump_le(buf, sid);
     }
     if !ua.after_session_ids.is_empty() {
         buf[flags_idx] |= 0b00000001;
-        (ua.after_wait.unwrap_or(0) as u64).serialise_to_buf(buf);
+        ua.after_wait.unwrap_or(0).serialise_to_buf(buf);
         (ua.after_session_ids.len() as u64).serialise_to_buf(buf);
         for sid in ua.after_session_ids {
             dump_le(buf, sid);
@@ -62,6 +69,9 @@ impl MessageCommandEncoder {
     fn read_file<P: AsRef<Path>>(&mut self, path: P) {
         // For now we will assume that the path exists
         let f = File::open(path).expect("Requested file does not exist");
+        // File length
+        let len = f.metadata().unwrap().len();
+        len.serialise_to_buf(&mut self.buf);
         let mut reader = BufReader::new(f);
         reader.read_to_end(&mut self.buf).unwrap();
     }
@@ -69,10 +79,13 @@ impl MessageCommandEncoder {
     fn read_file_offset<P: AsRef<Path>>(&mut self, path: P, offset: u64) {
         // For now we will assume that the path exists and the offset is valid
         let f = File::open(path).expect("Requested file does not exist");
+        let len = f.metadata().unwrap().len();
         let mut reader = BufReader::new(f);
         reader
             .seek_relative(offset as i64)
             .expect("Requested file is smaller than requested offset");
+        // File length
+        (len - offset).serialise_to_buf(&mut self.buf);
         reader.read_to_end(&mut self.buf).unwrap();
     }
 

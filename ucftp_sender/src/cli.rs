@@ -1,7 +1,7 @@
 use std::{error::Error, net::Ipv4Addr, path::PathBuf, str::FromStr};
 
-use clap::{Parser, Subcommand, ValueEnum};
-use ucftp_shared::{IP4_HEADER_SIZE, UDP_HEADER_SIZE};
+use clap::{Parser, Subcommand};
+use ucftp_shared::{IP4_HEADER_SIZE, UDP_HEADER_SIZE, message::*};
 
 const SAFE_IP4_PACKET_SIZE: u16 = 1280 - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
 
@@ -151,73 +151,6 @@ pub enum Command {
         path: String,
         mode: DeleteMode,
     },
-}
-
-/// Mode of appending to a file
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum AppendMode {
-    /// Append to existing or do nothing
-    Append,
-    /// Append or create
-    AppendCreate,
-}
-
-/// Mode of deletion
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum DeleteMode {
-    /// Delete only if path is file
-    File = 0,
-    /// Delete only if path is empty directory
-    EmptyDir,
-    /// Path is a file or empty directory
-    FileDir,
-    /// Recursively delete directory
-    Dir,
-    /// Link
-    Link,
-    /// Any file system object, recursive for directories. If the object is a link,
-    /// remove the link, not the object it points to
-    Any,
-}
-
-/// Mode of file creation when sending
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum CreateFileMode {
-    /// Create or overwrite
-    Overwrite = 0,
-    /// Create or do nothing
-    CreateNew,
-    /// Create or rename existing and create
-    RenameCreate,
-}
-
-/// Mode of creation: 0 - create or do nothing if exists, 1 - create or rename existing and create new
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum CreateDirMode {
-    /// Create or do nothing
-    CreateNew = 0,
-    /// Create or rename existing and create
-    RenameCreate,
-}
-
-/// Mode of link creation
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum CreateLinkMode {
-    /// Create or overwrite
-    Overwrite = 0,
-    /// Create or do nothing
-    CreateNew,
-    /// Create or rename and create
-    RenameCreate,
-}
-
-/// Type of the file system link
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum LinkKind {
-    /// Hard link
-    H,
-    /// Symbolic link
-    S,
 }
 
 /// Parse a single key-value pair

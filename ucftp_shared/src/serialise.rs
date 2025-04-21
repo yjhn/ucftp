@@ -1,4 +1,5 @@
-pub const SER_BYTE_MAX: u8 = 247;
+pub const U64_SER_BYTE_MAX: u8 = 247;
+pub const U32_SER_BYTE_MAX: u8 = 251;
 
 pub trait BufSerialise {
     /// Write serialized version of the value to buf. Returns number of bytes written.
@@ -17,7 +18,7 @@ impl BufSerialise for u64 {
     ///   which is then followed by int bytes in little-endian order
     fn serialise_to_buf(self, buf: &mut Vec<u8>) {
         let bytes = self.to_le_bytes();
-        if self <= SER_BYTE_MAX as u64 {
+        if self <= U64_SER_BYTE_MAX as u64 {
             buf.push(bytes[0]);
             return;
         }
@@ -25,7 +26,7 @@ impl BufSerialise for u64 {
         // Calculate number of bytes used to represent a number
         let used_bytes = self.ilog2() / 8 + 1;
 
-        buf.push(SER_BYTE_MAX + used_bytes as u8);
+        buf.push(U64_SER_BYTE_MAX + used_bytes as u8);
         buf.extend_from_slice(&bytes[..used_bytes as usize]);
     }
 }
@@ -33,14 +34,48 @@ impl BufSerialise for u64 {
 impl BufDeserialise for u64 {
     fn deserialise_from_buf(buf: &[u8]) -> (usize, u64) {
         let fb = buf[0];
-        if fb < 248 {
+        if fb <= U64_SER_BYTE_MAX {
             return (1, fb as u64);
         }
 
-        let used_bytes = (fb - 247) as usize;
+        let used_bytes = (fb - U64_SER_BYTE_MAX) as usize;
         let mut int = [0; 8];
         int[..used_bytes].copy_from_slice(&buf[1..=used_bytes]);
         (used_bytes + 1, u64::from_le_bytes(int))
+    }
+}
+
+impl BufSerialise for u32 {
+    /// Serialise int to a representation that favors small numbers:
+    /// - if 0 <= int < 252, result is int
+    /// - if int > 251, the first encoded byte is 251 + <number of bytes used by int>,
+    ///   which is then followed by int bytes in little-endian order
+    fn serialise_to_buf(self, buf: &mut Vec<u8>) {
+        let bytes = self.to_le_bytes();
+        if self <= U32_SER_BYTE_MAX as u32 {
+            buf.push(bytes[0]);
+            return;
+        }
+
+        // Calculate number of bytes used to represent a number
+        let used_bytes = self.ilog2() / 8 + 1;
+
+        buf.push(U32_SER_BYTE_MAX + used_bytes as u8);
+        buf.extend_from_slice(&bytes[..used_bytes as usize]);
+    }
+}
+
+impl BufDeserialise for u32 {
+    fn deserialise_from_buf(buf: &[u8]) -> (usize, u32) {
+        let fb = buf[0];
+        if fb <= U32_SER_BYTE_MAX {
+            return (1, fb as u32);
+        }
+
+        let used_bytes = (fb - U32_SER_BYTE_MAX) as usize;
+        let mut int = [0; 4];
+        int[..used_bytes].copy_from_slice(&buf[1..=used_bytes]);
+        (used_bytes + 1, u32::from_le_bytes(int))
     }
 }
 
@@ -134,23 +169,38 @@ mod tests {
     }
 
     #[test]
-    fn test_int_ser() {
-        assert_eq!(0u64, serde(0));
-        assert_eq!(1u64, serde(1));
-        assert_eq!(12u64, serde(12));
-        assert_eq!(123u64, serde(123));
-        assert_eq!(1234u64, serde(1234));
-        assert_eq!(12345u64, serde(12345));
-        assert_eq!(123456u64, serde(123456));
-        assert_eq!(1234567u64, serde(1234567));
-        assert_eq!(12345678u64, serde(12345678));
-        assert_eq!(123456789u64, serde(123456789));
-        assert_eq!(1234567890u64, serde(1234567890));
-        assert_eq!(12345678901u64, serde(12345678901));
-        assert_eq!(123456789012u64, serde(123456789012));
-        assert_eq!(1234567890123u64, serde(1234567890123));
-        assert_eq!(12345678901234u64, serde(12345678901234));
-        assert_eq!(123456789012345u64, serde(123456789012345));
+    fn test_int_ser_u64() {
+        assert_eq!(0u64, serde(0u64));
+        assert_eq!(1u64, serde(1u64));
+        assert_eq!(12u64, serde(12u64));
+        assert_eq!(123u64, serde(123u64));
+        assert_eq!(1234u64, serde(1234u64));
+        assert_eq!(12345u64, serde(12345u64));
+        assert_eq!(123456u64, serde(123456u64));
+        assert_eq!(1234567u64, serde(1234567u64));
+        assert_eq!(12345678u64, serde(12345678u64));
+        assert_eq!(123456789u64, serde(123456789u64));
+        assert_eq!(1234567890u64, serde(1234567890u64));
+        assert_eq!(12345678901u64, serde(12345678901u64));
+        assert_eq!(123456789012u64, serde(123456789012u64));
+        assert_eq!(1234567890123u64, serde(1234567890123u64));
+        assert_eq!(12345678901234u64, serde(12345678901234u64));
+        assert_eq!(123456789012345u64, serde(123456789012345u64));
+    }
+
+    #[test]
+    fn test_int_ser_u32() {
+        assert_eq!(0u32, serde(0u32));
+        assert_eq!(1u32, serde(1u32));
+        assert_eq!(12u32, serde(12u32));
+        assert_eq!(123u32, serde(123u32));
+        assert_eq!(1234u32, serde(1234u32));
+        assert_eq!(12345u32, serde(12345u32));
+        assert_eq!(123456u32, serde(123456u32));
+        assert_eq!(1234567u32, serde(1234567u32));
+        assert_eq!(12345678u32, serde(12345678u32));
+        assert_eq!(123456789u32, serde(123456789u32));
+        assert_eq!(1234567890u32, serde(1234567890u32));
     }
 
     #[test]

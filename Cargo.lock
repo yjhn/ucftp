@@ -560,6 +560,7 @@ name = "ucftp_shared"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "clap",
  "hpke",
  "rand_core 0.9.3",
 ]
