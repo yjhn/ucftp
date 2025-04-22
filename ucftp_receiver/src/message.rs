@@ -1,62 +1,10 @@
 use ucftp_shared::{
     message::*,
-    serialise::{BufDeserialise, u64_from_le_bytes},
+    serialise::{BufDeserialize, DeserializationError, TryBufDeserialize, u64_from_le_bytes},
 };
 
-/// Protocol message deserialization and execution
-// Flow:
-// 1. init packet is supplied
-// 2. decide which type of command it is
-// 3. start decoding its arguments
-// 4. deserialise in full fields only:
-//    - all fields are Option<T>
-//    - each of them is either fully populated or empty
-//    - we also hold a buffer of remaining data
-//    - each time that buffer is appended to, we try decoding more fields
-//      This has the potential to waste substantial amount of computation
-//      if the command has many string arguments
-//      Maybe each command could hold an enum that holds info of what remains
-//      to be read?
-// use std::num::{NonZeroU32, NonZeroUsize};
-
-// Values are cascading: when first value is done, we go to second
-// enum ExecCoRemDec {
-//     AbsolutePath(NonZeroUsize),
-//     EnvVars {
-//         number: NonZeroU32,
-//         length_remaining: usize,
-//     },
-//     ProgramArgs {
-//         number: NonZeroU32,
-//         length_remaining: usize,
-//     },
-//     None,
-// }
-
-// enum ExecCoInShellRemDec {
-//     Command(NonZeroUsize),
-//     None,
-// }
-
-// enum SetEnvVarsRemDec {
-
-//     None
-// }
-
-// pub enum MessageStreamingDeserialiser {
-//     ExecuteCommand { remaining: ExecCoRemDec },
-//     ExecuteCommandInShell { remaining: ExecCoInShellRemDec },
-//     SetEnvVars,
-// }
-
-// TODO(future): streaming deserialisation to avoid keeping all the state around
-// aead crate used by hpke does not have traits for decrypting into a provided buffer.
-// The only options are:
-// - in place - hpke does this
-// - create vec with contents as a result
-
 // TODO(future): make every string or byte array inside message point to places
-// in buf using `ouroboros` crate
+// in buf using `ouroboros` or `yoke` crate
 pub enum Command {
     ExecuteCommand {
         absolute_path: Box<str>,
@@ -119,34 +67,215 @@ pub enum Command {
     },
 }
 impl Command {
-    fn try_from_buf(buf: &[u8]) -> Result<(usize, Command), CommandError> {
-        let mut buf_used = 0;
+    fn try_from_buf(buf: &[u8]) -> Result<(usize, Command), DeserializationError> {
+        let mut buf_used = 1;
         match buf[0] {
-            0 => todo!(),
-            _ => Err(CommandError::UnknownType),
+            // Execute command
+            0 => {
+                let (used, absolute_path) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                let (used, env_vars) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                let (used, program_args) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                Ok((
+                    buf_used,
+                    Command::ExecuteCommand {
+                        absolute_path,
+                        env_vars,
+                        program_args,
+                    },
+                ))
+            }
+            // Exec in default shell (we can do so using libc::system)
+            1 => {
+                let (used, command) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                Ok((buf_used, Command::ExecuteCommandInShell { command }))
+            }
+            // Set env vars
+            2 => {
+                let (used, env_vars) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                Ok((buf_used, Command::SetEnvVars { env_vars }))
+            }
+            // Remove env vars
+            3 => {
+                let (used, env_vars) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                Ok((buf_used, Command::RemEnvVars { env_vars }))
+            }
+            // Execute received file
+            4 => {
+                if buf.len() - buf_used < 8 {
+                    return Err(DeserializationError::IncompleteValue);
+                }
+                let transfer_session_id = u64_from_le_bytes(&buf[buf_used..]);
+                buf_used += 8;
+                let (used, env_vars) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                let (used, program_args) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                Ok((
+                    buf_used,
+                    Command::ExecuteReceived {
+                        transfer_session_id,
+                        env_vars,
+                        program_args,
+                    },
+                ))
+            }
+            // Create dir
+            5 => {
+                let (used, absolute_path) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                if buf.len() == buf_used {
+                    return Err(DeserializationError::ValueExpected);
+                }
+                let mode = CreateDirMode::try_from(buf[buf_used])?;
+                buf_used += 1;
+                Ok((
+                    buf_used,
+                    Command::CreateDir {
+                        absolute_path,
+                        mode,
+                    },
+                ))
+            }
+            // Create file
+            6 => {
+                let (used, absolute_path) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                if buf.len() == buf_used {
+                    return Err(DeserializationError::ValueExpected);
+                }
+                let mode = CreateFileMode::try_from(buf[buf_used])?;
+                buf_used += 1;
+                let (used, file_data) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                Ok((
+                    buf_used,
+                    Command::CreateFile {
+                        absolute_path,
+                        mode,
+                        file_data,
+                    },
+                ))
+            }
+            // Append to file
+            7 => {
+                let (used, absolute_path) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                if buf.len() == buf_used {
+                    return Err(DeserializationError::ValueExpected);
+                }
+                let mode = AppendMode::try_from(buf[buf_used])?;
+                buf_used += 1;
+                let (used, file_data) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                Ok((
+                    buf_used,
+                    Command::AppendToFile {
+                        absolute_path,
+                        mode,
+                        file_data,
+                    },
+                ))
+            }
+            // Append to file from transfer
+            8 => {
+                if buf.len() - buf_used < 8 {
+                    return Err(DeserializationError::IncompleteValue);
+                }
+                let transfer_session_id = u64_from_le_bytes(&buf[buf_used..]);
+                buf_used += 8;
+                let (used, file_data) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                Ok((
+                    buf_used,
+                    Command::AppendToFileFromTransfer {
+                        transfer_session_id,
+                        file_data,
+                    },
+                ))
+            }
+            // Rename item
+            9 => {
+                let (used, absolute_path) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                let (used, new_name) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                Ok((
+                    buf_used,
+                    Command::RenameItem {
+                        absolute_path,
+                        new_name,
+                    },
+                ))
+            }
+            // Move item
+            10 => {
+                let (used, absolute_path) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                let (used, new_absolute_path) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                Ok((
+                    buf_used,
+                    Command::MoveItem {
+                        absolute_path,
+                        new_absolute_path,
+                    },
+                ))
+            }
+            // Add fs link
+            11 => {
+                let (used, absolute_path) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                if buf.len() == buf_used {
+                    return Err(DeserializationError::ValueExpected);
+                }
+                let mode = CreateLinkMode::try_from(buf[buf_used] & 0xf0)?;
+                let kind = LinkKind::try_from(buf[buf_used] & 0x0f)?;
+                buf_used += 1;
+                Ok((
+                    buf_used,
+                    Command::CreateLink {
+                        absolute_path,
+                        mode,
+                        kind,
+                    },
+                ))
+            }
+            // Delete item
+            12 => {
+                let (used, absolute_path) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
+                buf_used += used;
+                if buf.len() == buf_used {
+                    return Err(DeserializationError::ValueExpected);
+                }
+                let mode = DeleteMode::try_from(buf[buf_used])?;
+                buf_used += used;
+                Ok((
+                    buf_used,
+                    Command::Delete {
+                        absolute_path,
+                        mode,
+                    },
+                ))
+            }
+            _ => Err(DeserializationError::UnknownType),
         }
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum CommandError {
-    /// Command length does not match the one indicated in packet
-    LengthMismatch,
-    /// Unknown command type
-    UnknownType,
-    /// Some string in command is not proper UTF-8
-    StringEncoding,
-    /// Some field has an unexpected value, e.g. a u32 field has value > u32::MAX
-    BadFieldValue,
-}
-
+#[derive(Clone, Copy)]
 struct UnlessSession {
     session_id: u64,
-    wait_time: u32,
+    wait_time_ms: u32,
 }
 
 struct AfterSessions {
     session_ids: Vec<u64>,
+    wait_time_ms: u32,
 }
 
 pub struct CommandExecutor {
@@ -156,61 +285,67 @@ pub struct CommandExecutor {
 }
 
 impl CommandExecutor {
-    pub fn new(command_buf: &[u8]) -> Result<Self, CommandError> {
+    pub fn new(command_buf: &[u8]) -> Result<Self, DeserializationError> {
         // Length
+        if command_buf.len() < 8 {
+            return Err(DeserializationError::ValueExpected);
+        }
         let total_len = u64_from_le_bytes(command_buf);
         let mut buf_used = 8;
         if total_len != (command_buf.len() - buf_used) as u64 {
-            return Err(CommandError::LengthMismatch);
+            return Err(DeserializationError::LengthMismatch);
         }
         // Unless, after
         let flags = command_buf[buf_used];
         buf_used += 1;
         let mut unless = None;
         if (flags & 0b0000_0010) != 0 {
-            // TODO(impl): use actual compressed u32, not compressed u64. That way
-            // wrong values are unrepresentable
-            let (used, wait_time) =
-                <u32 as BufDeserialise>::deserialise_from_buf(&command_buf[buf_used..]);
+            let (used, wait_time_ms) =
+                <u32 as TryBufDeserialize>::try_deserialize_from_buf(&command_buf[buf_used..])?;
             buf_used += used;
+            if command_buf.len() < buf_used + 8 {
+                return Err(DeserializationError::ValueExpected);
+            }
             let session_id = u64_from_le_bytes(&command_buf[buf_used..]);
             buf_used += 8;
             unless = Some(UnlessSession {
                 session_id,
-                wait_time,
+                wait_time_ms,
             })
         }
         let mut after = None;
         if (flags & 0b0000_0001) != 0 {
-            let (used, wait_time) =
-                <u32 as BufDeserialise>::deserialise_from_buf(&command_buf[buf_used..]);
+            let (used, wait_time_ms) =
+                <u32 as TryBufDeserialize>::try_deserialize_from_buf(&command_buf[buf_used..])?;
             buf_used += used;
             let (used, count) =
-                <u64 as BufDeserialise>::deserialise_from_buf(&command_buf[buf_used..]);
+                <u64 as TryBufDeserialize>::try_deserialize_from_buf(&command_buf[buf_used..])?;
+            buf_used += used;
             let mut session_ids = Vec::with_capacity(count as usize);
             for _ in 0..count {
+                if command_buf.len() < buf_used + 8 {
+                    return Err(DeserializationError::ValueExpected);
+                }
                 let id = u64_from_le_bytes(&command_buf[buf_used..]);
                 buf_used += 8;
                 session_ids.push(id);
             }
-            after = Some(AfterSessions { session_ids });
+            after = Some(AfterSessions {
+                session_ids,
+                wait_time_ms,
+            });
         }
-        // Type
-        let command = match Command::try_from_buf(&command_buf[buf_used..]) {
-            Ok((used, c)) => {
-                buf_used += used;
-                if buf_used < command_buf.len() {
-                    eprintln!("ignoring extra data at the end of protocol message");
-                }
-                c
-            }
-            Err(e) => return Err(e),
-        };
+        // Command
+        let (used, command) = Command::try_from_buf(&command_buf[buf_used..])?;
+        if buf_used + used < command_buf.len() {
+            // TODO: use proper logging with levels, e.g. log crate
+            eprintln!("ignoring extra data at the end of protocol message");
+        }
 
         Ok(CommandExecutor {
             unless,
             after,
-            command: todo!(),
+            command,
         })
     }
 }

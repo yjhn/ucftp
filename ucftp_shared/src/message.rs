@@ -1,5 +1,7 @@
 use clap::ValueEnum;
 
+use crate::serialise::DeserializationError;
+
 /// Mode of appending to a file
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum AppendMode {
@@ -7,6 +9,18 @@ pub enum AppendMode {
     Append,
     /// Append or create
     AppendCreate,
+}
+
+impl TryFrom<u8> for AppendMode {
+    type Error = DeserializationError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Append),
+            1 => Ok(Self::AppendCreate),
+            _ => Err(DeserializationError::UnknownEnumValue),
+        }
+    }
 }
 
 /// Mode of deletion
@@ -27,6 +41,22 @@ pub enum DeleteMode {
     Any,
 }
 
+impl TryFrom<u8> for DeleteMode {
+    type Error = DeserializationError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::File),
+            1 => Ok(Self::EmptyDir),
+            2 => Ok(Self::FileDir),
+            3 => Ok(Self::Dir),
+            4 => Ok(Self::Link),
+            5 => Ok(Self::Any),
+            _ => Err(DeserializationError::UnknownEnumValue),
+        }
+    }
+}
+
 /// Mode of file creation when sending
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CreateFileMode {
@@ -38,6 +68,19 @@ pub enum CreateFileMode {
     RenameCreate,
 }
 
+impl TryFrom<u8> for CreateFileMode {
+    type Error = DeserializationError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Overwrite),
+            1 => Ok(Self::CreateNew),
+            2 => Ok(Self::RenameCreate),
+            _ => Err(DeserializationError::UnknownEnumValue),
+        }
+    }
+}
+
 /// Mode of creation: 0 - create or do nothing if exists, 1 - create or rename existing and create new
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CreateDirMode {
@@ -45,6 +88,18 @@ pub enum CreateDirMode {
     CreateNew = 0,
     /// Create or rename existing and create
     RenameCreate,
+}
+
+impl TryFrom<u8> for CreateDirMode {
+    type Error = DeserializationError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::CreateNew),
+            1 => Ok(Self::RenameCreate),
+            _ => Err(DeserializationError::UnknownEnumValue),
+        }
+    }
 }
 
 /// Mode of link creation
@@ -58,6 +113,19 @@ pub enum CreateLinkMode {
     RenameCreate,
 }
 
+impl TryFrom<u8> for CreateLinkMode {
+    type Error = DeserializationError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Overwrite),
+            1 => Ok(Self::CreateNew),
+            2 => Ok(Self::RenameCreate),
+            _ => Err(DeserializationError::UnknownEnumValue),
+        }
+    }
+}
+
 /// Type of the file system link
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum LinkKind {
@@ -65,4 +133,16 @@ pub enum LinkKind {
     H,
     /// Symbolic link
     S,
+}
+
+impl TryFrom<u8> for LinkKind {
+    type Error = DeserializationError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::H),
+            1 => Ok(Self::S),
+            _ => Err(DeserializationError::UnknownEnumValue),
+        }
+    }
 }

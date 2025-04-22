@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::Path;
 
 use crate::cli::Command;
-use ucftp_shared::serialise::{BufSerialise, dump_le};
+use ucftp_shared::serialise::{BufSerialize, dump_le};
 
 pub struct UnlessAfter {
     pub unless_session_id: Option<u64>,
@@ -40,13 +40,13 @@ fn encode_message_metadata(buf: &mut Vec<u8>, ua: UnlessAfter) {
     buf.push(0);
     if let Some(sid) = ua.unless_session_id {
         buf[flags_idx] |= 0b00000010;
-        ua.unless_wait.unwrap_or(0).serialise_to_buf(buf);
+        ua.unless_wait.unwrap_or(0).serialize_to_buf(buf);
         dump_le(buf, sid);
     }
     if !ua.after_session_ids.is_empty() {
         buf[flags_idx] |= 0b00000001;
-        ua.after_wait.unwrap_or(0).serialise_to_buf(buf);
-        (ua.after_session_ids.len() as u64).serialise_to_buf(buf);
+        ua.after_wait.unwrap_or(0).serialize_to_buf(buf);
+        (ua.after_session_ids.len() as u64).serialize_to_buf(buf);
         for sid in ua.after_session_ids {
             dump_le(buf, sid);
         }
@@ -71,7 +71,7 @@ impl MessageCommandEncoder {
         let f = File::open(path).expect("Requested file does not exist");
         // File length
         let len = f.metadata().unwrap().len();
-        len.serialise_to_buf(&mut self.buf);
+        len.serialize_to_buf(&mut self.buf);
         let mut reader = BufReader::new(f);
         reader.read_to_end(&mut self.buf).unwrap();
     }
@@ -85,7 +85,7 @@ impl MessageCommandEncoder {
             .seek_relative(offset as i64)
             .expect("Requested file is smaller than requested offset");
         // File length
-        (len - offset).serialise_to_buf(&mut self.buf);
+        (len - offset).serialize_to_buf(&mut self.buf);
         reader.read_to_end(&mut self.buf).unwrap();
     }
 
@@ -93,26 +93,26 @@ impl MessageCommandEncoder {
         self.buf.push(command.to_command_number());
         match command {
             Command::Run { path, args, env } => {
-                path.serialise_to_buf(&mut self.buf);
-                env.serialise_to_buf(&mut self.buf);
-                args.serialise_to_buf(&mut self.buf);
+                path.serialize_to_buf(&mut self.buf);
+                env.serialize_to_buf(&mut self.buf);
+                args.serialize_to_buf(&mut self.buf);
             }
             Command::RunShell { command } => {
-                command.serialise_to_buf(&mut self.buf);
+                command.serialize_to_buf(&mut self.buf);
             }
             Command::SetEnv { env } => {
-                env.serialise_to_buf(&mut self.buf);
+                env.serialize_to_buf(&mut self.buf);
             }
             Command::RmEnv { env } => {
-                env.serialise_to_buf(&mut self.buf);
+                env.serialize_to_buf(&mut self.buf);
             }
             Command::RunReceived { id, args, env } => {
                 dump_le(&mut self.buf, *id);
-                env.serialise_to_buf(&mut self.buf);
-                args.serialise_to_buf(&mut self.buf);
+                env.serialize_to_buf(&mut self.buf);
+                args.serialize_to_buf(&mut self.buf);
             }
             Command::CreateDir { path, mode } => {
-                path.serialise_to_buf(&mut self.buf);
+                path.serialize_to_buf(&mut self.buf);
                 self.buf.push(*mode as u8);
             }
             Command::SendFile {
@@ -120,7 +120,7 @@ impl MessageCommandEncoder {
                 remote_path,
                 mode,
             } => {
-                remote_path.serialise_to_buf(&mut self.buf);
+                remote_path.serialize_to_buf(&mut self.buf);
                 self.buf.push(*mode as u8);
                 self.read_file(local_path);
             }
@@ -130,7 +130,7 @@ impl MessageCommandEncoder {
                 remote_path,
                 mode,
             } => {
-                remote_path.serialise_to_buf(&mut self.buf);
+                remote_path.serialize_to_buf(&mut self.buf);
                 self.buf.push(*mode as u8);
                 if let Some(o) = offset {
                     self.read_file_offset(local_path, *o);
@@ -151,12 +151,12 @@ impl MessageCommandEncoder {
                 }
             }
             Command::Rename { from, to } => {
-                from.serialise_to_buf(&mut self.buf);
-                to.serialise_to_buf(&mut self.buf);
+                from.serialize_to_buf(&mut self.buf);
+                to.serialize_to_buf(&mut self.buf);
             }
             Command::Move { from, to } => {
-                from.serialise_to_buf(&mut self.buf);
-                to.serialise_to_buf(&mut self.buf);
+                from.serialize_to_buf(&mut self.buf);
+                to.serialize_to_buf(&mut self.buf);
             }
             Command::CreateLink {
                 target,
@@ -164,12 +164,12 @@ impl MessageCommandEncoder {
                 mode,
                 kind,
             } => {
-                target.serialise_to_buf(&mut self.buf);
-                source.serialise_to_buf(&mut self.buf);
+                target.serialize_to_buf(&mut self.buf);
+                source.serialize_to_buf(&mut self.buf);
                 self.buf.push((*mode as u8) << 4 | (*kind as u8));
             }
             Command::Delete { path, mode } => {
-                path.serialise_to_buf(&mut self.buf);
+                path.serialize_to_buf(&mut self.buf);
                 self.buf.push(*mode as u8);
             }
         }
