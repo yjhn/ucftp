@@ -541,6 +541,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "hpke",
+ "libc",
  "rand",
  "ucftp_shared",
 ]

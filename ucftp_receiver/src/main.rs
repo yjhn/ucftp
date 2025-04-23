@@ -1,3 +1,4 @@
+mod executor;
 mod message;
 
 use std::cmp::max;
@@ -57,6 +58,8 @@ fn packet_send_timeout(t: u32) -> bool {
 //   - if it starts a new session, start a new session
 //   - otherwise, try to decode the packet in all sessions in order from most to least likely
 fn main() {
+    // TODO(future): use non-blocking IO (sock.set_nonblocking(true)) to waste less
+    // time waiting
     let sock = UdpSocket::bind(RECEIVE_ADDR).expect("Failed to bind to port 4321");
     eprintln!("Listening on {}:{}", Ipv4Addr::UNSPECIFIED, RECEIVER_PORT);
 
@@ -418,10 +421,107 @@ impl Receiver {
         }
     }
 
+    fn handle_packet(&mut self, packet_len: usize) {
+        // Packet must belong to one of the known types
+        let packet_type = match PacketType::try_from(self.packet_buf[0]) {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!(" - unrecognized packet type");
+                return;
+            }
+        };
+        match packet_type {
+            PacketType::FirstData => {
+                // TODO(refactor): don't decrypt the packet,
+                // hand it over immediately to the session, it will know
+                // whether it is worth decrypting
+                let new_session = match InProgressSession::try_from_init_packet_buf(
+                    &mut self.packet_buf[1..packet_len],
+                    &self.sender_pks,
+                    &self.receiver_sk,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!(" - failed to parse: {:?}", e);
+                        return;
+                    }
+                };
+                // TODO: check if session is complete
+                let mut insert = None;
+                let mut remove = None;
+                for (i, s) in self.uninit_sessions.iter_mut().enumerate() {
+                    if s.session_id() == new_session.session_id() {
+                        // This is the only place where session timeouts are
+                        // checked. So old sessions will only be discarded when
+                        // a packet arrives with a matching session ID.
+                        if s.progress_timeout() {
+                            eprintln!(
+                                " - session timeout occured, putting packet in a new session"
+                            );
+                            // Insert the new session and remove the old one
+                            insert = Some(new_session);
+                            remove = Some(i);
+                            break;
+                        }
+                        break;
+                    }
+                }
+                match insert {
+                    Some(s) => {
+                        self.uninit_sessions.remove(remove.unwrap());
+                        self.in_progress_sessions.push(s)
+                    }
+                    None => (),
+                }
+            }
+            PacketType::RegularData => {
+                let packet = match EncryptedPacket::try_from_buf(
+                    &mut self.packet_buf[1..packet_len],
+                    PacketType::RegularData,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!(" - failed to parse: {:?}", e);
+                        return;
+                    }
+                };
+                let mut insert = None;
+                let mut remove = None;
+                for (i, s) in self.in_progress_sessions.iter_mut().enumerate() {
+                    if s.session_id() == packet.session_id {
+                        // This is the only place where session timeouts are
+                        // checked. So old sessions will only be discarded when
+                        // a packet arrives with a matching session ID.
+                        if s.progress_timeout() {
+                            eprintln!(
+                                " - session timeout occured, putting packet in a new session"
+                            );
+                            // Put it in a new session and destroy the old session
+                            insert = Some(UninitSession::from_middle_packet(packet));
+                            remove = Some(i);
+                            break;
+                        }
+                        break;
+                    }
+                }
+                match insert {
+                    Some(s) => {
+                        self.in_progress_sessions.remove(remove.unwrap());
+                        self.uninit_sessions.push(s)
+                    }
+                    None => (),
+                }
+            }
+            PacketType::LastData => {
+                todo!();
+            }
+        }
+    }
+
     fn receive_loop(&mut self) {
         loop {
             let (packet_len, addr) = self.socket.recv_from(&mut self.packet_buf).unwrap();
-            eprint!("packet from {}", addr);
+            eprint!("packet from {} ", addr);
 
             // Packet processing steps:
             // 1. determine type:
@@ -432,101 +532,7 @@ impl Receiver {
             // 3. find session with matching session id
             //    - check if timeout occured
             // 4. hand over packet to that session
-
-            // Packet must belong to one of the known types
-            let packet_type = match PacketType::try_from(self.packet_buf[0]) {
-                Ok(p) => p,
-                Err(_) => {
-                    eprintln!(" - unrecognized packet type");
-                    continue;
-                }
-            };
-            match packet_type {
-                PacketType::FirstData => {
-                    // TODO(refactor): don't decrypt the packet,
-                    // hand it over immediately to the session, it will know
-                    // whether it is worth decrypting
-                    let new_session = match InProgressSession::try_from_init_packet_buf(
-                        &mut self.packet_buf[1..packet_len],
-                        &self.sender_pks,
-                        &self.receiver_sk,
-                    ) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!(" - failed to parse: {:?}", e);
-                            continue;
-                        }
-                    };
-                    // TODO: check if session is complete
-                    let mut insert = None;
-                    let mut remove = None;
-                    for (i, s) in self.uninit_sessions.iter_mut().enumerate() {
-                        if s.session_id() == new_session.session_id() {
-                            // This is the only place where session timeouts are
-                            // checked. So old sessions will only be discarded when
-                            // a packet arrives with a matching session ID.
-                            if s.progress_timeout() {
-                                eprintln!(
-                                    " - session timeout occured, putting packet in a new session"
-                                );
-                                // Insert the new session and remove the old one
-                                insert = Some(new_session);
-                                remove = Some(i);
-                                break;
-                            }
-                            break;
-                        }
-                    }
-                    match insert {
-                        Some(s) => {
-                            self.uninit_sessions.remove(remove.unwrap());
-                            self.in_progress_sessions.push(s)
-                        }
-                        None => (),
-                    }
-                }
-                PacketType::RegularData => {
-                    let packet = match EncryptedPacket::try_from_buf(
-                        &mut self.packet_buf[1..packet_len],
-                        PacketType::RegularData,
-                    ) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            eprintln!(" - failed to parse: {:?}", e);
-                            continue;
-                        }
-                    };
-                    let mut insert = None;
-                    let mut remove = None;
-                    for (i, s) in self.in_progress_sessions.iter_mut().enumerate() {
-                        if s.session_id() == packet.session_id {
-                            // This is the only place where session timeouts are
-                            // checked. So old sessions will only be discarded when
-                            // a packet arrives with a matching session ID.
-                            if s.progress_timeout() {
-                                eprintln!(
-                                    " - session timeout occured, putting packet in a new session"
-                                );
-                                // Put it in a new session and destroy the old session
-                                insert = Some(UninitSession::from_middle_packet(packet));
-                                remove = Some(i);
-                                break;
-                            }
-                            break;
-                        }
-                    }
-                    match insert {
-                        Some(s) => {
-                            self.in_progress_sessions.remove(remove.unwrap());
-                            self.uninit_sessions.push(s)
-                        }
-                        None => (),
-                    }
-                }
-                PacketType::LastData => {
-                    todo!();
-                }
-            }
+            self.handle_packet(packet_len);
         }
     }
 }

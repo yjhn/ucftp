@@ -12,3 +12,4 @@ hpke.workspace = true
 clap.workspace = true
 rand.workspace = true
 ucftp_shared = { path = "../ucftp_shared" }
+libc = "0.2.172"

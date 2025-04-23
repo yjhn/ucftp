@@ -3,7 +3,7 @@ use clap::ValueEnum;
 use crate::serialise::DeserializationError;
 
 /// Mode of appending to a file
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum AppendMode {
     /// Append to existing or do nothing
     Append,
@@ -26,7 +26,7 @@ impl TryFrom<u8> for AppendMode {
 /// Mode of deletion
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum DeleteMode {
-    /// Delete only if path is file
+    /// Delete only if path is a file
     File = 0,
     /// Delete only if path is empty directory
     EmptyDir,
@@ -34,8 +34,9 @@ pub enum DeleteMode {
     FileDir,
     /// Recursively delete directory
     Dir,
-    /// Link
-    Link,
+    /// Symbolic link. Hard link is not different to a regular file
+    // TODO(thesis): specify this
+    Symlink,
     /// Any file system object, recursive for directories. If the object is a link,
     /// remove the link, not the object it points to
     Any,
@@ -50,7 +51,7 @@ impl TryFrom<u8> for DeleteMode {
             1 => Ok(Self::EmptyDir),
             2 => Ok(Self::FileDir),
             3 => Ok(Self::Dir),
-            4 => Ok(Self::Link),
+            4 => Ok(Self::Symlink),
             5 => Ok(Self::Any),
             _ => Err(DeserializationError::UnknownEnumValue),
         }
@@ -127,7 +128,7 @@ impl TryFrom<u8> for CreateLinkMode {
 }
 
 /// Type of the file system link
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum LinkKind {
     /// Hard link
     H,
