@@ -1,9 +1,12 @@
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::time;
 
+use base64::DecodeSliceError;
 use base64::engine::{Engine, general_purpose::STANDARD as BASE64_STANDARD};
 use hpke::Deserializable;
+use hpke::HpkeError;
 use hpke::OpModeR;
 use hpke::OpModeS;
 use hpke::aead::AeadCtxR;
@@ -81,33 +84,87 @@ pub fn protocol_time() -> u32 {
     (unix_ts_now.as_secs() - PROTOCOL_TIME_UNIX_EPOCH_OFFSET as u64) as u32
 }
 
-pub fn read_sk<P: AsRef<Path>>(path: P) -> PrivateKey {
+#[derive(Debug)]
+pub enum KeyReadError {
+    IoError(io::Error),
+    /// Public key swapped with private key
+    WrongKeyKind,
+    /// File is not a recognized key file
+    UnrecognizedFile,
+    /// File has the required header, but is not there
+    FileTooShort,
+    /// Key line is too short
+    KeyTooShort,
+    /// Failed to decode base64 line: too long, wrong chars
+    LineFailedDecode(DecodeSliceError),
+    /// Failed to create the key from material
+    DeserError(HpkeError),
+}
+
+pub fn read_sk<P: AsRef<Path>>(path: P) -> Result<PrivateKey, KeyReadError> {
     let file_contents = fs::read_to_string(path).unwrap();
     parse_sk(&file_contents)
 }
 
-pub fn read_pk<P: AsRef<Path>>(path: P) -> PublicKey {
+pub fn read_pk<P: AsRef<Path>>(path: P) -> Result<PublicKey, KeyReadError> {
     let file_contents = fs::read_to_string(path).unwrap();
     parse_pk(&file_contents)
 }
 
-fn parse_sk(pem: &str) -> PrivateKey {
+fn parse_sk(pem: &str) -> Result<PrivateKey, KeyReadError> {
     let mut buf = [0; 48];
-    decode_pem_line(pem, &mut buf);
-    PrivateKey::from_bytes(&buf[16..]).unwrap()
-}
-
-fn parse_pk(pem: &str) -> PublicKey {
-    let mut buf = [0; 44];
-    decode_pem_line(pem, &mut buf);
-    PublicKey::from_bytes(&buf[12..]).unwrap()
-}
-
-fn decode_pem_line(pem: &str, buf: &mut [u8]) {
     let mut lines = pem.lines();
-    lines.next();
-    let key_base64 = lines.next().unwrap();
-    BASE64_STANDARD.decode_slice(key_base64, buf).unwrap();
+    match lines.next() {
+        Some("-----BEGIN PRIVATE KEY-----") => (),
+        Some("-----BEGIN PUBLIC KEY-----") => return Err(KeyReadError::WrongKeyKind),
+        _ => return Err(KeyReadError::UnrecognizedFile),
+    }
+    match lines.next() {
+        Some(l) => match decode_pem_line(l, &mut buf) {
+            Ok(len) => {
+                if len < 44 {
+                    return Err(KeyReadError::KeyTooShort);
+                }
+            }
+            Err(e) => return Err(KeyReadError::LineFailedDecode(e)),
+        },
+
+        None => return Err(KeyReadError::UnrecognizedFile),
+    }
+    match PrivateKey::from_bytes(&buf[12..]) {
+        Ok(key) => Ok(key),
+        Err(e) => Err(KeyReadError::DeserError(e)),
+    }
+}
+
+fn parse_pk(pem: &str) -> Result<PublicKey, KeyReadError> {
+    let mut buf = [0; 44];
+    let mut lines = pem.lines();
+    match lines.next() {
+        Some("-----BEGIN PUBLIC KEY-----") => (),
+        Some("-----BEGIN PRIVATE KEY-----") => return Err(KeyReadError::WrongKeyKind),
+        _ => return Err(KeyReadError::UnrecognizedFile),
+    }
+    match lines.next() {
+        Some(l) => match decode_pem_line(l, &mut buf) {
+            Ok(len) => {
+                if len < 44 {
+                    return Err(KeyReadError::KeyTooShort);
+                }
+            }
+            Err(e) => return Err(KeyReadError::LineFailedDecode(e)),
+        },
+
+        None => return Err(KeyReadError::UnrecognizedFile),
+    }
+    match PublicKey::from_bytes(&buf[12..]) {
+        Ok(key) => Ok(key),
+        Err(e) => Err(KeyReadError::DeserError(e)),
+    }
+}
+
+fn decode_pem_line(key_line: &str, buf: &mut [u8]) -> Result<usize, DecodeSliceError> {
+    BASE64_STANDARD.decode_slice(key_line, buf)
 }
 
 pub fn init_sender_crypto(

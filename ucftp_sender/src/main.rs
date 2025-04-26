@@ -183,7 +183,7 @@ fn get_keys(
         "reading receiver public key from '{}'",
         receiver_key_file.display()
     );
-    let receiver_pk = read_pk(receiver_key_file);
+    let receiver_pk = read_pk(receiver_key_file).unwrap();
 
     (sender_sk, sender_pk, receiver_pk)
 }
@@ -200,10 +200,10 @@ fn get_keys(
 // Last 32 bytes are the keys: https://stackoverflow.com/a/58209771
 fn read_sender_keys(mut dir: PathBuf) -> (PrivateKey, PublicKey) {
     dir.push("sender_sk.pem");
-    let sk = read_sk(&dir);
+    let sk = read_sk(&dir).unwrap();
     dir.pop();
     dir.push("sender_pk.pem");
-    let pk = read_pk(&dir);
+    let pk = read_pk(&dir).unwrap();
 
     (sk, pk)
 }

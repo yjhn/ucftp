@@ -1,12 +1,18 @@
+mod cli;
 mod executor;
 mod message;
 mod session;
 
+use std::fs;
 use std::net::Ipv4Addr;
 use std::net::SocketAddrV4;
 use std::net::UdpSocket;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Instant;
 
+use clap::Parser;
+use cli::Cli;
 use executor::GlobalExecutor;
 use message::CommandExecutor;
 use session::EncryptedPacket;
@@ -25,17 +31,51 @@ const RECEIVE_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, RECE
 //   - if it starts a new session, start a new session
 //   - otherwise, try to decode the packet in all sessions in order from most to least likely
 fn main() {
+    let Cli {
+        sender_keys_dir,
+        receiver_sk_file,
+    } = dbg!(cli::Cli::parse());
+
+    let (receiver_sk, sender_pks) = get_keys(receiver_sk_file, sender_keys_dir);
+
     // TODO(future): use non-blocking IO (sock.set_nonblocking(true)) to waste less
     // time waiting
     let sock = UdpSocket::bind(RECEIVE_ADDR).expect("Failed to bind to port 4321");
     eprintln!("Listening on {}", RECEIVE_ADDR);
 
-    let receiver_sk = read_sk("../test/keys/receiver_sk.pem");
-    let sender_pk = read_pk("../test/keys/sender_pk.pem");
-
-    let mut receiver = Receiver::new(sock, Box::from([sender_pk]), receiver_sk);
+    let mut receiver = Receiver::new(sock, sender_pks.into_boxed_slice(), receiver_sk);
 
     receiver.receive_loop();
+}
+
+// Returns (receiver_sk, Vec<sender_pk>)
+fn get_keys(
+    receiver_sk_file: Option<PathBuf>,
+    sender_keys_dir: Option<PathBuf>,
+) -> (PrivateKey, Vec<PublicKey>) {
+    let receiver_sk_file =
+        receiver_sk_file.unwrap_or_else(|| PathBuf::from_str("./receiver_sk.pem").unwrap());
+    eprintln!(
+        "reading receiver public keys from '{}'",
+        receiver_sk_file.display()
+    );
+    let receiver_sk = read_sk(receiver_sk_file).unwrap();
+
+    let sender_keys_dir = sender_keys_dir.unwrap_or_else(|| PathBuf::from_str("./").unwrap());
+    eprintln!(
+        "reading receiver private key from '{}'",
+        sender_keys_dir.display()
+    );
+    let paths = fs::read_dir(sender_keys_dir).unwrap();
+    let mut sender_keys = Vec::with_capacity(4);
+    for p in paths {
+        let p = p.unwrap().path();
+        let k = read_pk(&p).unwrap();
+        sender_keys.push(k);
+        eprintln!("read sender key {}", p.display());
+    }
+
+    (receiver_sk, sender_keys)
 }
 
 struct Receiver {
