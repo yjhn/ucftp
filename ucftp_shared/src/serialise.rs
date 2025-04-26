@@ -1,3 +1,5 @@
+use std::str;
+
 pub const U64_SER_BYTE_MAX: u8 = 247;
 pub const U32_SER_BYTE_MAX: u8 = 251;
 
@@ -90,6 +92,8 @@ impl BufSerialize for &[u8] {
 pub enum DeserializationError {
     /// Numeric value is expected at the current position but not present
     ValueExpected,
+    /// Same meaning as ValueExpected, but used for total command length only
+    CommandLenExpected,
     /// The supplied buffer is 0 bytes in length
     BufferEmpty,
     /// Incomplete numeric value

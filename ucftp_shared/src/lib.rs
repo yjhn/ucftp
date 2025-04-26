@@ -127,10 +127,7 @@ pub fn try_decapsulate_key(
     encapped_key: &EncappedKey,
 ) -> Option<AeadCtxR<ChosenAead, ChosenKdf, ChosenKem>> {
     let opmode = OpModeR::Auth(sender_pk);
-    match hpke::setup_receiver(&opmode, receiver_sk, encapped_key, PROTOCOL_INFO) {
-        Ok(c) => Some(c),
-        Err(_) => None,
-    }
+    hpke::setup_receiver(&opmode, receiver_sk, encapped_key, PROTOCOL_INFO).ok()
 }
 
 #[cfg(test)]

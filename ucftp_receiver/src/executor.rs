@@ -31,19 +31,20 @@ impl GlobalExecutor {
 
     // TODO(thesis): specify that the timeouts only start after the whole command
     // has been received and decoded (or maybe that implementations can choose?)
-    pub fn add_pending(&mut self, mut command: CommandExecutor, session_id: u64) {
+    pub fn add_pending(&mut self, mut command: CommandExecutor) {
         // Check preconditions
         command.remove_unless_list(&self.past_sessions);
         command.remove_after_multiple(&self.past_sessions);
 
         // Try executing
         if command.can_execute(0) {
+            let session_id = command.session_id();
             self.process_result(
                 command.execute_unchecked(&self.past_commands_data),
                 session_id,
             );
         } else {
-            let com_meta = CommandWithMetadata::new(session_id, command);
+            let com_meta = CommandWithMetadata::new(command);
             self.pending_commands.push(com_meta);
         }
     }
@@ -91,7 +92,7 @@ impl GlobalExecutor {
             let c = &self.pending_commands[i];
             if c.can_execute(now) {
                 let c = self.pending_commands.swap_remove(i);
-                let session = c.session_id;
+                let session = c.session_id();
                 self.process_result(c.execute_unchecked(&self.past_commands_data), session);
             } else {
                 i += 1;
@@ -111,7 +112,6 @@ impl GlobalExecutor {
 }
 
 struct CommandWithMetadata {
-    session_id: u64,
     // used for tracking whether the required timeouts of command sequencing
     // have elapsed
     init_time: Instant,
@@ -119,9 +119,8 @@ struct CommandWithMetadata {
 }
 
 impl CommandWithMetadata {
-    pub fn new(session_id: u64, command: CommandExecutor) -> Self {
+    pub fn new(command: CommandExecutor) -> Self {
         Self {
-            session_id,
             init_time: Instant::now(),
             command,
         }
@@ -144,6 +143,10 @@ impl CommandWithMetadata {
         executed_commands: &[CompactCommandSession],
     ) -> CommandExecutionResult {
         self.command.execute_unchecked(executed_commands)
+    }
+
+    fn session_id(&self) -> u64 {
+        self.command.session_id()
     }
 }
 

@@ -1,5 +1,3 @@
-use libc;
-
 use std::{
     env,
     ffi::CString,
@@ -19,12 +17,12 @@ use ucftp_shared::{
 // TODO(future): make every string or byte array inside message point to places
 // in buf using `ouroboros` or `yoke` crate
 pub enum Command {
-    ExecuteCommand {
+    Execute {
         absolute_path: Box<str>,
         env_vars: Box<[(Box<str>, Box<str>)]>,
         program_args: Box<[Box<str>]>,
     },
-    ExecuteCommandInShell {
+    ExecuteInShell {
         command: Box<str>,
     },
     SetEnvVars {
@@ -94,7 +92,7 @@ impl Command {
                 buf_used += used;
                 Ok((
                     buf_used,
-                    Command::ExecuteCommand {
+                    Command::Execute {
                         absolute_path,
                         env_vars,
                         program_args,
@@ -105,7 +103,7 @@ impl Command {
             1 => {
                 let (used, command) = Box::try_deserialize_from_buf(&buf[buf_used..])?;
                 buf_used += used;
-                Ok((buf_used, Command::ExecuteCommandInShell { command }))
+                Ok((buf_used, Command::ExecuteInShell { command }))
             }
             // Set env vars
             2 => {
@@ -310,7 +308,7 @@ impl Command {
     // - take self and move out
     fn execute(self, executed_commands: &[CompactCommandSession]) -> CommandExecutionResult {
         match self {
-            Command::ExecuteCommand {
+            Command::Execute {
                 absolute_path,
                 env_vars,
                 program_args,
@@ -326,7 +324,7 @@ impl Command {
                     Err(e) => CommandExecutionResult::Error(e),
                 }
             }
-            Command::ExecuteCommandInShell { command } => match c_system(&command) {
+            Command::ExecuteInShell { command } => match c_system(&command) {
                 Ok(_) => CommandExecutionResult::Success,
                 Err(e) => CommandExecutionResult::Error(e),
             },
@@ -735,10 +733,11 @@ pub struct CommandExecutor {
     unless: UnlessSession,
     after: AfterSessions,
     command: Command,
+    session_id: u64,
 }
 
 impl CommandExecutor {
-    pub fn new(command_buf: &[u8]) -> Result<Self, DeserializationError> {
+    pub fn new(command_buf: &[u8], session_id: u64) -> Result<Self, DeserializationError> {
         // Length
         if command_buf.len() < 8 {
             return Err(DeserializationError::ValueExpected);
@@ -804,6 +803,7 @@ impl CommandExecutor {
             unless,
             after,
             command,
+            session_id,
         })
     }
 
@@ -837,6 +837,10 @@ impl CommandExecutor {
     ) -> CommandExecutionResult {
         self.command.execute(executed_commands)
     }
+
+    pub fn session_id(&self) -> u64 {
+        self.session_id
+    }
 }
 
 pub enum CommandExecutionResult {
@@ -862,9 +866,7 @@ pub enum CommandExecutionResult {
 // TODO(future): append \0 to command string when deserializing
 fn c_system(command: &str) -> io::Result<()> {
     let s = CString::from_str(command)?;
-    let ret = unsafe {
-        libc::system(s.as_ptr());
-    };
+    let ret = unsafe { libc::system(s.as_ptr()) };
     check_c_err(ret)
 }
 
@@ -893,36 +895,6 @@ pub struct CompactCommandSession {
 
 impl CompactCommandSession {
     pub fn from_path(session_id: u64, path: Box<str>) -> Self {
-        // match command {
-        //     Command::CreateFile { absolute_path, .. } => Some(Self {
-        //         session_id,
-        //         path: absolute_path,
-        //     }),
-        //     Command::AppendToFile { absolute_path, .. } => Some(Self {
-        //         session_id,
-        //         path: absolute_path,
-        //     }),
-        //     // TODO: we need to build the complete destination path and store
-        //     // it somewhere
-        //     Command::RenameItem {
-        //         absolute_path,
-        //         new_name,
-        //     } => todo!(),
-        //     Command::MoveItem {
-        //         new_absolute_path, ..
-        //     } => Some(Self {
-        //         session_id,
-        //         path: new_absolute_path,
-        //     }),
-        //     Command::CreateLink {
-        //         absolute_path_src, ..
-        //     } => Some(Self {
-        //         session_id,
-        //         path: absolute_path_src,
-        //     }),
-        //     _ => None,
-        // }
-
         Self { session_id, path }
     }
 }
