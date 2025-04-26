@@ -689,6 +689,12 @@ impl UnlessSession {
     fn fulfilled(&self, time_passed_ms: u32) -> bool {
         self.wait_time_ms <= time_passed_ms
     }
+
+    fn remove_list(&mut self, session_ids: &[u64]) {
+        if session_ids.contains(&self.session_id) {
+            self.wait_time_ms = 0;
+        }
+    }
 }
 
 struct AfterSessions {
@@ -718,6 +724,10 @@ impl AfterSessions {
         // Wait time is set to 0 when the last session ID is removed,
         // so we don't need to check the list
         self.wait_time_ms <= time_passed_ms
+    }
+
+    fn remove_multiple(&mut self, session_ids: &[u64]) {
+        self.session_ids.retain(|id| !session_ids.contains(id));
     }
 }
 
@@ -802,8 +812,17 @@ impl CommandExecutor {
         self.unless.remove(session_id);
     }
 
+    /// Removes the `unless` dependency, if it exists and its id is in `session_ids`
+    pub fn remove_unless_list(&mut self, session_ids: &[u64]) {
+        self.unless.remove_list(session_ids);
+    }
+
     pub fn remove_after(&mut self, session_id: u64) {
         self.after.remove(session_id);
+    }
+
+    pub fn remove_after_multiple(&mut self, session_ids: &[u64]) {
+        self.after.remove_multiple(session_ids);
     }
 
     pub fn can_execute(&self, time_passed_ms: u32) -> bool {

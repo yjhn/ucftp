@@ -61,7 +61,7 @@ fn main() {
     // TODO(future): use non-blocking IO (sock.set_nonblocking(true)) to waste less
     // time waiting
     let sock = UdpSocket::bind(RECEIVE_ADDR).expect("Failed to bind to port 4321");
-    eprintln!("Listening on {}:{}", Ipv4Addr::UNSPECIFIED, RECEIVER_PORT);
+    eprintln!("Listening on {}", RECEIVE_ADDR);
 
     let mut packet_buf = [0; MAX_PACKET_SIZE as usize];
     // Establish a new session
