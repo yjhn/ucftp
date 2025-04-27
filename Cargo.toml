@@ -21,3 +21,5 @@ lto = "thin"
 clap = { version = "4.5", features = ["derive"] }
 hpke = { version = "0.13", default-features = false, features = ["x25519"] }
 rand = "0.9.1"
+log = "0.4.27"
+env_logger = { version = "0.11.8", default-features = false, features = ["color", "humantime"] }

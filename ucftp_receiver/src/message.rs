@@ -9,6 +9,7 @@ use std::{
     str::FromStr,
 };
 
+use log::{debug, error, info, trace, warn};
 use ucftp_shared::{
     message::*,
     serialise::{DeserializationError, TryBufDeserialize, u64_from_le_bytes},
@@ -16,6 +17,7 @@ use ucftp_shared::{
 
 // TODO(future): make every string or byte array inside message point to places
 // in buf using `ouroboros` or `yoke` crate
+#[derive(Debug)]
 pub enum Command {
     Execute {
         absolute_path: Box<str>,
@@ -373,7 +375,7 @@ impl Command {
                         Err(e) => CommandExecutionResult::Error(e),
                     }
                 } else {
-                    CommandExecutionResult::SessionNotFound
+                    CommandExecutionResult::SessionNotFound(transfer_session_id)
                 }
             }
             // TODO(thesis): what about parent dirs? Should they be automatically
@@ -468,7 +470,7 @@ impl Command {
                         Err(e) => CommandExecutionResult::Error(e),
                     }
                 } else {
-                    CommandExecutionResult::SessionNotFound
+                    CommandExecutionResult::SessionNotFound(transfer_session_id)
                 }
             }
             Command::RenameItem {
@@ -664,7 +666,7 @@ impl Command {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct UnlessSession {
     session_id: u64,
     wait_time_ms: u32,
@@ -695,6 +697,7 @@ impl UnlessSession {
     }
 }
 
+#[derive(Debug)]
 struct AfterSessions {
     session_ids: Vec<u64>,
     wait_time_ms: u32,
@@ -729,6 +732,7 @@ impl AfterSessions {
     }
 }
 
+#[derive(Debug)]
 pub struct CommandExecutor {
     unless: UnlessSession,
     after: AfterSessions,
@@ -795,8 +799,7 @@ impl CommandExecutor {
         // Command
         let (used, command) = Command::try_from_buf(&command_buf[buf_used..])?;
         if buf_used + used < command_buf.len() {
-            // TODO: use proper logging with levels, e.g. log crate
-            eprintln!("ignoring extra data at the end of protocol message");
+            warn!("ignoring extra data at the end of protocol message");
         }
 
         Ok(CommandExecutor {
@@ -860,7 +863,7 @@ pub enum CommandExecutionResult {
     /// - the command was not sent/received
     /// - the command was of the wrong type (it did not create/append to a file)
     /// - the command failed
-    SessionNotFound,
+    SessionNotFound(u64),
 }
 
 // TODO(future): append \0 to command string when deserializing

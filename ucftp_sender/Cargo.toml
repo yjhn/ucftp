@@ -11,4 +11,6 @@ license.workspace = true
 clap.workspace = true
 hpke.workspace = true
 rand.workspace = true
+log.workspace = true
+env_logger.workspace = true
 ucftp_shared = { path = "../ucftp_shared" }

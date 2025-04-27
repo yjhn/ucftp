@@ -1,6 +1,9 @@
 use clap::Parser;
+use cli::Cli;
+use env_logger::{self, fmt::WriteStyle};
 use hpke::Serializable;
 use hpke::aead::AeadCtxS;
+use log::{debug, error, info, trace, warn};
 use rand::CryptoRng;
 use rand::Rng;
 use rand::SeedableRng;
@@ -85,6 +88,11 @@ impl PacketIter {
             &self.protocol_message
                 [self.protocol_message_used..self.protocol_message_used + body_len],
         );
+        trace!(
+            "encrypted {} bytes, AAD len {} bytes",
+            self.packet_buffer.len() - aad_end,
+            aad_end
+        );
         self.protocol_message_used += body_len;
         let (aad, data) = self.packet_buffer.split_at_mut(aad_end);
         let auth_tag = self.crypto_ctx.seal_in_place_detached(data, aad).unwrap();
@@ -126,6 +134,14 @@ impl PacketIter {
 }
 
 fn main() {
+    env_logger::builder()
+        .format_timestamp(None)
+        .format_target(false)
+        .write_style(WriteStyle::Always)
+        .init();
+    info!("starting up");
+    let cli = Cli::parse();
+    debug!("CLI args: {:?}", &cli);
     let cli::Cli {
         remote_ip,
         command,
@@ -136,7 +152,7 @@ fn main() {
         packet_size,
         sender_keys_dir,
         receiver_pk_file,
-    } = dbg!(cli::Cli::parse());
+    } = cli;
 
     let protocol_message = serialise_message(
         &command,
@@ -163,9 +179,10 @@ fn main() {
         packet_size,
     );
 
+    let receiver = SocketAddrV4::new(remote_ip, RECEIVER_PORT);
     while let Some(packet) = packet_iter.next_packet() {
-        sock.send_to(packet, SocketAddrV4::new(remote_ip, RECEIVER_PORT))
-            .unwrap();
+        debug!("sending packet to {}", receiver);
+        sock.send_to(packet, receiver).unwrap();
     }
 }
 
@@ -175,11 +192,11 @@ fn get_keys(
     receiver_pk_file: Option<PathBuf>,
 ) -> (PrivateKey, PublicKey, PublicKey) {
     let sender_keys_dir = sender_keys_dir.unwrap_or_else(|| PathBuf::from_str(".").unwrap());
-    eprintln!("reading sender keys from '{}'", sender_keys_dir.display());
+    info!("reading sender keys from '{}'", sender_keys_dir.display());
     let (sender_sk, sender_pk) = read_sender_keys(sender_keys_dir);
     let receiver_key_file =
         receiver_pk_file.unwrap_or_else(|| PathBuf::from_str("./receiver_pk.pem").unwrap());
-    eprintln!(
+    info!(
         "reading receiver public key from '{}'",
         receiver_key_file.display()
     );
@@ -200,9 +217,11 @@ fn get_keys(
 // Last 32 bytes are the keys: https://stackoverflow.com/a/58209771
 fn read_sender_keys(mut dir: PathBuf) -> (PrivateKey, PublicKey) {
     dir.push("sender_sk.pem");
+    info!("reading private key from {}", dir.display());
     let sk = read_sk(&dir).unwrap();
     dir.pop();
     dir.push("sender_pk.pem");
+    info!("reading sender public key from {}", dir.display());
     let pk = read_pk(&dir).unwrap();
 
     (sk, pk)
@@ -214,7 +233,7 @@ fn bind_socket(rng: &mut impl Rng) -> UdpSocket {
         let socket = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
         match UdpSocket::bind(socket) {
             Ok(sock) => {
-                eprintln!("bound to: {}", socket);
+                debug!("bound to: {}", socket);
                 break sock;
             }
             Err(_) => continue,

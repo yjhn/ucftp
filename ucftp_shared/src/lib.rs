@@ -122,7 +122,7 @@ fn parse_sk(pem: &str) -> Result<PrivateKey, KeyReadError> {
     match lines.next() {
         Some(l) => match decode_pem_line(l, &mut buf) {
             Ok(len) => {
-                if len < 44 {
+                if len < 48 {
                     return Err(KeyReadError::KeyTooShort);
                 }
             }
@@ -131,7 +131,7 @@ fn parse_sk(pem: &str) -> Result<PrivateKey, KeyReadError> {
 
         None => return Err(KeyReadError::UnrecognizedFile),
     }
-    match PrivateKey::from_bytes(&buf[12..]) {
+    match PrivateKey::from_bytes(&buf[16..]) {
         Ok(key) => Ok(key),
         Err(e) => Err(KeyReadError::DeserError(e)),
     }
@@ -198,7 +198,7 @@ mod tests {
             -----BEGIN PRIVATE KEY-----\n\
             MC4CAQAwBQYDK2VuBCIEIHAKHLUz5njU6wgTxEX8vpKXr4bIBleXWUGhKfPhN15B\n\
             -----END PRIVATE KEY-----";
-        let sk = parse_sk(pem);
+        let sk = parse_sk(pem).unwrap();
         let expected = PrivateKey::from_bytes(&[
             0x70, 0x0a, 0x1c, 0xb5, 0x33, 0xe6, 0x78, 0xd4, 0xeb, 0x08, 0x13, 0xc4, 0x45, 0xfc,
             0xbe, 0x92, 0x97, 0xaf, 0x86, 0xc8, 0x06, 0x57, 0x97, 0x59, 0x41, 0xa1, 0x29, 0xf3,
@@ -214,7 +214,7 @@ mod tests {
             -----BEGIN PUBLIC KEY-----\n\
             MCowBQYDK2VuAyEA/LYkVYQTh6+IM46ZEpdrf79Mgtr8mL1XZG8/niWghC8=\n\
             -----END PUBLIC KEY-----";
-        let pk = parse_pk(pem);
+        let pk = parse_pk(pem).unwrap();
         let expected = PublicKey::from_bytes(&[
             0xfc, 0xb6, 0x24, 0x55, 0x84, 0x13, 0x87, 0xaf, 0x88, 0x33, 0x8e, 0x99, 0x12, 0x97,
             0x6b, 0x7f, 0xbf, 0x4c, 0x82, 0xda, 0xfc, 0x98, 0xbd, 0x57, 0x64, 0x6f, 0x3f, 0x9e,

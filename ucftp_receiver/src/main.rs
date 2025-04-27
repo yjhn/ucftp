@@ -13,7 +13,9 @@ use std::time::Instant;
 
 use clap::Parser;
 use cli::Cli;
+use env_logger::{self, fmt::WriteStyle};
 use executor::GlobalExecutor;
+use log::{debug, error, info, trace, warn};
 use message::CommandExecutor;
 use session::EncryptedPacket;
 use session::InProgressSession;
@@ -25,23 +27,23 @@ use ucftp_shared::*;
 const MAX_PACKET_SIZE: u16 = 9216 - 18 - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
 const RECEIVE_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, RECEIVER_PORT);
 
-// Architecture:
-// - main loop listens on net interface
-// - when a packet arrives:
-//   - if it starts a new session, start a new session
-//   - otherwise, try to decode the packet in all sessions in order from most to least likely
 fn main() {
-    let Cli {
-        sender_keys_dir,
-        receiver_sk_file,
-    } = dbg!(cli::Cli::parse());
+    env_logger::builder()
+        .format_timestamp(None)
+        .format_target(false)
+        .write_style(WriteStyle::Always)
+        .init();
+    info!("starting up");
 
-    let (receiver_sk, sender_pks) = get_keys(receiver_sk_file, sender_keys_dir);
+    let cli = Cli::parse();
+    debug!("CLI args: {:?}", &cli);
+
+    let (receiver_sk, sender_pks) = get_keys(cli.receiver_sk_file, cli.sender_keys_dir);
 
     // TODO(future): use non-blocking IO (sock.set_nonblocking(true)) to waste less
     // time waiting
     let sock = UdpSocket::bind(RECEIVE_ADDR).expect("Failed to bind to port 4321");
-    eprintln!("Listening on {}", RECEIVE_ADDR);
+    info!("listening on {}", RECEIVE_ADDR);
 
     let mut receiver = Receiver::new(sock, sender_pks.into_boxed_slice(), receiver_sk);
 
@@ -55,14 +57,14 @@ fn get_keys(
 ) -> (PrivateKey, Vec<PublicKey>) {
     let receiver_sk_file =
         receiver_sk_file.unwrap_or_else(|| PathBuf::from_str("./receiver_sk.pem").unwrap());
-    eprintln!(
+    info!(
         "reading receiver public keys from '{}'",
         receiver_sk_file.display()
     );
     let receiver_sk = read_sk(receiver_sk_file).unwrap();
 
     let sender_keys_dir = sender_keys_dir.unwrap_or_else(|| PathBuf::from_str("./").unwrap());
-    eprintln!(
+    info!(
         "reading receiver private key from '{}'",
         sender_keys_dir.display()
     );
@@ -70,9 +72,12 @@ fn get_keys(
     let mut sender_keys = Vec::with_capacity(4);
     for p in paths {
         let p = p.unwrap().path();
-        let k = read_pk(&p).unwrap();
+        let k = match read_pk(&p) {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
         sender_keys.push(k);
-        eprintln!("read sender key {}", p.display());
+        debug!("read sender key {}", p.display());
     }
 
     (receiver_sk, sender_keys)
@@ -101,6 +106,16 @@ impl Receiver {
         }
     }
 
+    fn add_in_progress(&mut self, session: InProgressSession) {
+        debug!("tracking new session {}", session.session_id());
+        self.in_progress_sessions.push(session);
+    }
+
+    fn add_uninit(&mut self, session: UninitSession) {
+        debug!("tracking new session {}", session.session_id());
+        self.uninit_sessions.push(session);
+    }
+
     /// Returns a newly finished session if the packet finished one
     #[must_use]
     fn handle_packet(&mut self, packet_len: usize) -> Option<CommandExecutor> {
@@ -108,7 +123,7 @@ impl Receiver {
         let packet_type = match PacketType::try_from(self.packet_buf[0]) {
             Ok(p) => p,
             Err(_) => {
-                eprintln!(" - unrecognized packet type");
+                error!("unrecognized packet type");
                 return None;
             }
         };
@@ -118,23 +133,28 @@ impl Receiver {
                 // hand it over immediately to the session, it will know
                 // whether it is worth decrypting
                 let mut new_session = match InProgressSession::try_from_init_packet_buf(
-                    &mut self.packet_buf[1..packet_len],
+                    &mut self.packet_buf[..packet_len],
                     &self.sender_pks,
                     &self.receiver_sk,
                 ) {
-                    Ok(p) => match p.session_status() {
-                        SessionStatus::Complete(command_executor) => return Some(command_executor),
-                        SessionStatus::Incomplete => p,
-                        // Session is complete and corrupt, so we discard it
-                        SessionStatus::Corrupt => return None,
-                    },
+                    Ok(p) => {
+                        trace!("init data packet received for session {}", p.session_id());
+                        match p.session_status() {
+                            SessionStatus::Complete(command_executor) => {
+                                return Some(command_executor);
+                            }
+                            SessionStatus::Incomplete => p,
+                            // Session is complete and corrupt, so we discard it
+                            SessionStatus::Corrupt => return None,
+                        }
+                    }
                     Err(e) => {
-                        eprintln!(" - failed to parse: {:?}", e);
+                        error!("failed to parse packet: {:?}", e);
                         return None;
                     }
                 };
-                let now = Instant::now();
                 if !self.uninit_sessions.is_empty() {
+                    let now = Instant::now();
                     let mut i = 0;
                     // Try merging with uninit session having same session ID
                     // TODO: here we check only uninit sessions. We should handle
@@ -151,7 +171,7 @@ impl Receiver {
                         // TODO: we should only check timeouts occasioanlly
                         // (like every 5s), not on receive of every packet
                         if s.progress_timeout_from(now) {
-                            eprintln!("timeout for session {}", s.session_id());
+                            debug!("timeout for session {}", s.session_id());
                             self.uninit_sessions.swap_remove(i);
                             // We swap-removed current elem from the list, so the
                             // index does not advance
@@ -177,7 +197,7 @@ impl Receiver {
                     }
                 }
                 // This is a truly new session
-                self.in_progress_sessions.push(new_session);
+                self.add_in_progress(new_session);
                 None
             }
             PacketType::RegularData | PacketType::LastData => {
@@ -188,7 +208,7 @@ impl Receiver {
                 ) {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!(" - failed to parse: {:?}", e);
+                        warn!("failed to parse packet: {:?}", e);
                         return None;
                     }
                 };
@@ -198,7 +218,7 @@ impl Receiver {
                     loop {
                         let s = &mut self.uninit_sessions[i];
                         if s.progress_timeout_from(now) {
-                            eprintln!("timeout for session {}", s.session_id());
+                            debug!("timeout for session {}", s.session_id());
                             self.uninit_sessions.swap_remove(i);
                             // We swap-removed current elem from the list, so the
                             // index does not advance
@@ -219,7 +239,7 @@ impl Receiver {
                     loop {
                         let s = &mut self.in_progress_sessions[i];
                         if s.progress_timeout_from(now) {
-                            eprintln!("timeout for session {}", s.session_id());
+                            debug!("timeout for session {}", s.session_id());
                             self.in_progress_sessions.swap_remove(i);
                             // We swap-removed current elem from the list, so the
                             // index does not advance
@@ -240,8 +260,7 @@ impl Receiver {
                     }
                 }
                 // This is a truly new session
-                self.uninit_sessions
-                    .push(UninitSession::from_middle_packet(packet));
+                self.add_uninit(UninitSession::from_middle_packet(packet));
                 None
             }
         }
@@ -251,7 +270,7 @@ impl Receiver {
         loop {
             // TODO: do not block here
             let (packet_len, addr) = self.socket.recv_from(&mut self.packet_buf).unwrap();
-            eprintln!("packet from {}", addr);
+            trace!("packet from {}", addr);
 
             // Packet processing steps:
             // 1. determine type:
@@ -263,8 +282,12 @@ impl Receiver {
             //    - check if timeout occured
             // 4. hand over packet to that session
             match self.handle_packet(packet_len) {
-                Some(exec) => self.command_executor.add_pending(exec),
-                None => todo!(),
+                Some(exec) => {
+                    // TODO: add debug print impl that ignores file contents
+                    trace!("received command: {:?}", &exec);
+                    self.command_executor.add_pending(exec);
+                }
+                None => (),
             }
 
             self.handle_completed_sessions();

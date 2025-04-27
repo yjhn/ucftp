@@ -1,5 +1,4 @@
 use std::cmp::Ordering;
-use std::cmp::max;
 use std::time::Instant;
 
 use hpke::Deserializable;
@@ -7,6 +6,7 @@ use hpke::HpkeError;
 use hpke::aead::AeadCtxR;
 use hpke::aead::AeadTag;
 use hpke::aead::AesGcm128;
+use log::{debug, error, info, trace, warn};
 use ucftp_shared::serialise::*;
 use ucftp_shared::*;
 
@@ -30,13 +30,13 @@ const MIN_FIRST_PACKET_LEN: u16 = 6 // protocol ID
     + 8   // session ID
     + 6   // sequence number
     + 4   // send time
-    + 1   // there must be at least 1 byte of actual data
+    + 9   // at least message len + 1 byte of actual content
     + 16; // auth tag
 const MIN_PACKET_LEN: u16 = 1 // packet type
     + 8   // session ID
     + 6   // sequence number
     + 4   // send time
-    + 1   // data
+    + 9   // at least message len + 1 byte of actual content
     + 16; // auth tag
 
 fn packet_send_timeout(t: u32) -> bool {
@@ -194,7 +194,9 @@ pub struct InProgressSession {
     session_extensions: SessionExtensions,
     // sequence number of first packet is always 0 - TODO(thesis): it is
     // probably a good idea to allow packet numbers to start from
-    // arbitrary value, as long as they will not overflow the counter
+    // arbitrary value, as long as they will not overflow the counter - or
+    // it could overflow the counter and we could check that the seq is
+    // 0 < seq < start || progress < seq
     sequence_number_start: u64,
     command_buf: Vec<u8>,
     // packet sequence ID needed to make progress on decryption
@@ -265,10 +267,15 @@ impl InProgressSession {
         // successfully decapped, this packet will be discarded if we fail
         // decryption anyway, so this doesn't matter
         let buf_tag_start = packet.len() - 16;
+        let auth_tag = AeadTag::from_bytes(&packet[buf_tag_start..]).unwrap();
         let (aad, data_tag) = packet.split_at_mut(packet_used);
-        // let (data, tag_bytes) = buf.split_at_mut(buf_tag_start);
-        let auth_tag = AeadTag::from_bytes(&data_tag[buf_tag_start..]).unwrap();
-        match crypto_ctx.open_in_place_detached(&mut data_tag[..buf_tag_start], aad, &auth_tag) {
+        let ciphertext = &mut data_tag[..buf_tag_start - packet_used];
+        trace!(
+            "decrypting: ct len {}, AAD len {}",
+            ciphertext.len(),
+            aad.len()
+        );
+        match crypto_ctx.open_in_place_detached(ciphertext, aad, &auth_tag) {
             Ok(_) => (),
             Err(e) => return Err(PacketError::CryptoErr(e)),
         }
@@ -301,11 +308,13 @@ impl InProgressSession {
     // - progress timeout must not have passed
     // - self must only have the first packet (otherwise all remaining ones
     //   will be lost)
+    // - self must not be older than other
     #[must_use]
     pub fn merge(&mut self, mut uninit_session: UninitSession, now: Instant) -> SessionStatus {
         debug_assert_eq!(self.session_id, uninit_session.session_id);
         debug_assert!((Instant::now() - self.progress_time()).as_secs() < PROGRESS_TIMEOUT + 5);
         debug_assert!(self.out_of_order_packet_buffer.is_empty());
+        debug_assert!(self.last_packet_time >= uninit_session.init_time);
         // Sort packets by sequence number
         uninit_session
             .packet_buf
@@ -317,8 +326,6 @@ impl InProgressSession {
         }
 
         self.out_of_order_packet_buffer = uninit_session.packet_buf;
-        // TODO: is it possible that uninit_session is newer than self?
-        self.last_packet_time = max(self.last_packet_time, uninit_session.init_time);
 
         self.session_status()
     }
@@ -348,9 +355,8 @@ impl InProgressSession {
             Ok(_time) => {
                 self.last_packet_time = now;
                 self.seq_to_make_progress += 1;
-                // TODO: try decrypting more packets
             }
-            Err(e) => eprintln!(" - packet decryption error: {:?}", e),
+            Err(e) => error!("packet decryption error: {:?}", e),
         }
     }
 
@@ -361,6 +367,10 @@ impl InProgressSession {
         // Try decrypt
         match self.seq_to_make_progress.cmp(&packet.sequence_number) {
             Ordering::Less => {
+                trace!(
+                    "adding packet {} to session {} out-of-order buffer",
+                    packet.sequence_number, self.session_id
+                );
                 self.out_of_order_packet_buffer.push(packet);
                 SessionStatus::Incomplete
             }
@@ -370,6 +380,10 @@ impl InProgressSession {
             }
             Ordering::Greater => {
                 // Irrelevant packet number. Possibly duplicate. Discard
+                trace!(
+                    "possibly duplicate packet {} of session {}",
+                    packet.sequence_number, self.session_id
+                );
                 SessionStatus::Incomplete
             }
         }
@@ -378,19 +392,24 @@ impl InProgressSession {
     /// Check if this session is complete
     // TODO(thesis): add that total length field really helps with detecting when
     // the command has been fully received
+    #[must_use]
     pub fn session_status(&self) -> SessionStatus {
         // Strategies to check if complete:
         // - all packet numbers first..=last have been received (last here means
         //   packet with last session packet type)
         // - command parsing does not fail
         match CommandExecutor::new(&self.command_buf, self.session_id) {
-            Ok(command) => SessionStatus::Complete(command),
+            Ok(command) => {
+                debug!("received full command for session {}", self.session_id());
+                SessionStatus::Complete(command)
+            }
             Err(e) => match e {
                 DeserializationError::CommandLenExpected | DeserializationError::LengthMismatch => {
+                    debug!("failed attempt to deserialize session: {:?}", e);
                     SessionStatus::Incomplete
                 }
                 err => {
-                    eprintln!("error parsing command: {:?}", err);
+                    error!("error parsing command: {:?}", err);
                     SessionStatus::Corrupt
                 }
             },
