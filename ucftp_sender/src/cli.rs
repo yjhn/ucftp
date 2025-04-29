@@ -8,7 +8,7 @@ const SAFE_IP4_PACKET_SIZE: u16 = 1280 - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
 /// Unidirectional Command and File Transfer Protocol CLI.
 /// Send commands and data to a remote machine.
 #[derive(Debug, Parser)]
-#[command(name = "scftp")]
+#[command(name = "ucftp")]
 #[command(arg_required_else_help = true)]
 pub struct Cli {
     /// IPv4 address of the remote
@@ -40,6 +40,9 @@ pub struct Cli {
     /// File containing the receiver public key
     #[arg(short = 'r')]
     pub receiver_pk_file: Option<PathBuf>,
+    /// Maximum transfer speed in kB/s
+    #[arg(short = 's')]
+    pub max_speed: Option<u32>,
 }
 
 /// Protocol capabilities

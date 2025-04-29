@@ -15,6 +15,47 @@ use ucftp_shared::{
     serialise::{DeserializationError, TryBufDeserialize, u64_from_le_bytes},
 };
 
+// FEC using RaptorQ crate
+// Notes:
+// - FEC takes a buffer of data and desirable packet len, and:
+//   1. produces a number of source packets from source, and prepends each packet
+//      with 4-byte ID, consisting of sequential number and source block number
+//      Will pad the block with zeros if data size is not a multiple of packet size.
+//
+//      Nobody requires us to send that padding. We can encode, say, 100 packets at
+//      a time and since only the last packet is padded, we don't have to include the
+//      padding. Padding len can be calculated (and appended for the decoding
+//      purposes by the receiver) based on packet number (assuming we
+//      have the first packet, which contains all required information, including
+//      the start of the packet sequence counter). First packet can be interleaved and
+//      periodically sent along with others (without giving it a different counter),
+//      to maximise delivery probability
+//   2. produces any number of repair packets (user-specified)
+// - no more than 256 (source?) packets can be generated per block
+// - encoding of packet numbers is big-endian
+//
+
+pub struct FileData {
+    data: Box<[u8]>,
+}
+impl FileData {
+    fn new(data: Box<[u8]>) -> Self {
+        Self { data }
+    }
+
+    fn data(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl std::fmt::Debug for FileData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileData")
+            .field("data", &format!("<file data of len: {}>", self.data.len()))
+            .finish()
+    }
+}
+
 // TODO(future): make every string or byte array inside message point to places
 // in buf using `ouroboros` or `yoke` crate
 #[derive(Debug)]
@@ -45,16 +86,16 @@ pub enum Command {
     CreateFile {
         absolute_path: Box<str>,
         mode: CreateFileMode,
-        file_data: Box<[u8]>,
+        file_data: FileData,
     },
     AppendToFile {
         absolute_path: Box<str>,
         mode: AppendMode,
-        file_data: Box<[u8]>,
+        file_data: FileData,
     },
     AppendToFileFromTransfer {
         transfer_session_id: u64,
-        file_data: Box<[u8]>,
+        file_data: FileData,
     },
     RenameItem {
         // TODO(thesis): no need to limit renaming/moving to fields and dirs. Links also work just fine
@@ -172,7 +213,7 @@ impl Command {
                     Command::CreateFile {
                         absolute_path,
                         mode,
-                        file_data,
+                        file_data: FileData::new(file_data),
                     },
                 ))
             }
@@ -192,7 +233,7 @@ impl Command {
                     Command::AppendToFile {
                         absolute_path,
                         mode,
-                        file_data,
+                        file_data: FileData::new(file_data),
                     },
                 ))
             }
@@ -209,7 +250,7 @@ impl Command {
                     buf_used,
                     Command::AppendToFileFromTransfer {
                         transfer_session_id,
-                        file_data,
+                        file_data: FileData::new(file_data),
                     },
                 ))
             }
@@ -420,14 +461,14 @@ impl Command {
                             }
                         }
                         CreateFileMode::Overwrite => {
-                            match fs::write(absolute_path.as_ref(), &file_data) {
+                            match fs::write(absolute_path.as_ref(), &file_data.data()) {
                                 Ok(_) => CommandExecutionResult::SuccessPath(absolute_path),
                                 Err(e) => CommandExecutionResult::Error(e),
                             }
                         }
                     }
                 } else {
-                    match fs::write(absolute_path.as_ref(), &file_data) {
+                    match fs::write(absolute_path.as_ref(), file_data.data()) {
                         Ok(_) => CommandExecutionResult::SuccessPath(absolute_path),
                         Err(e) => CommandExecutionResult::Error(e),
                     }
@@ -443,7 +484,7 @@ impl Command {
                     .create(mode == AppendMode::AppendCreate)
                     .open(absolute_path.as_ref())
                 {
-                    Ok(mut f) => match f.write_all(&file_data) {
+                    Ok(mut f) => match f.write_all(file_data.data()) {
                         Ok(_) => CommandExecutionResult::SuccessPath(absolute_path),
                         Err(e) => CommandExecutionResult::Error(e),
                     },
@@ -463,7 +504,7 @@ impl Command {
                         .create(false)
                         .open(c.path.as_ref())
                     {
-                        Ok(mut f) => match f.write_all(&file_data) {
+                        Ok(mut f) => match f.write_all(file_data.data()) {
                             Ok(_) => CommandExecutionResult::SuccessPath(c.path.clone()),
                             Err(e) => CommandExecutionResult::Error(e),
                         },

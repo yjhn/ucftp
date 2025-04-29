@@ -57,6 +57,7 @@ pub enum PacketType {
     FirstData = 0, // - first packet is indicated by protocol identifier
     RegularData = 1,
     LastData,
+    ErrorCorrection,
 }
 
 impl TryFrom<u8> for PacketType {
@@ -67,6 +68,7 @@ impl TryFrom<u8> for PacketType {
             b'U' => Ok(PacketType::FirstData),
             1 => Ok(PacketType::RegularData),
             2 => Ok(PacketType::LastData),
+            3 => Ok(PacketType::ErrorCorrection),
             _ => Err(()),
         }
     }

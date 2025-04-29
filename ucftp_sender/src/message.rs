@@ -4,6 +4,7 @@ use std::io::Read;
 use std::path::Path;
 
 use crate::cli::Command;
+use log::{debug, error, info, trace, warn};
 use ucftp_shared::serialise::{BufSerialize, dump_le};
 
 pub struct UnlessAfter {
@@ -71,6 +72,7 @@ impl MessageCommandEncoder {
         let f = File::open(path).expect("Requested file does not exist");
         // File length
         let len = f.metadata().unwrap().len();
+        info!("sending file of {} bytes", len);
         len.serialize_to_buf(&mut self.buf);
         let mut reader = BufReader::new(f);
         reader.read_to_end(&mut self.buf).unwrap();
@@ -85,7 +87,9 @@ impl MessageCommandEncoder {
             .seek_relative(offset as i64)
             .expect("Requested file is smaller than requested offset");
         // File length
-        (len - offset).serialize_to_buf(&mut self.buf);
+        let send_len = len - offset;
+        info!("sending file fragment of {} bytes", send_len);
+        send_len.serialize_to_buf(&mut self.buf);
         reader.read_to_end(&mut self.buf).unwrap();
     }
 

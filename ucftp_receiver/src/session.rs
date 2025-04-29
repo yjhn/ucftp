@@ -75,8 +75,8 @@ impl EncryptedPacket {
         packet_used += 6;
 
         let buf_tag_start = packet.len() - 16;
-        let (_aad, data_tag) = packet.split_at(packet_used);
-        let auth_tag = AeadTag::from_bytes(&data_tag[buf_tag_start..]).unwrap();
+        // let (_aad, data_tag) = packet.split_at(packet_used);
+        let auth_tag = AeadTag::from_bytes(&packet[buf_tag_start..]).unwrap();
 
         // Allocate storage for the protocol message
         let encrypted_data = Box::from(&packet[packet_used..buf_tag_start]);
@@ -184,11 +184,16 @@ impl UninitSession {
     pub fn add_packet(&mut self, packet: EncryptedPacket) {
         debug_assert_eq!(self.session_id(), packet.session_id);
         debug_assert!((Instant::now() - self.progress_time()).as_secs() < PROGRESS_TIMEOUT + 5);
+        trace!(
+            "added packet {} to uninit session {}",
+            packet.sequence_number, self.session_id
+        );
         self.packet_buf.push(packet);
     }
 }
 
 pub struct InProgressSession {
+    // Will only be needed if rekeying is implemented
     sender_pk: PublicKey,
     session_id: u64,
     session_extensions: SessionExtensions,
@@ -215,6 +220,7 @@ impl InProgressSession {
         sender_pks: &[PublicKey],
         receiver_sk: &PrivateKey,
     ) -> Result<Self, PacketError> {
+        trace!("InProgressSession being created");
         let now = Instant::now();
         // Failure modes:
         // - header incorrect
@@ -270,11 +276,11 @@ impl InProgressSession {
         let auth_tag = AeadTag::from_bytes(&packet[buf_tag_start..]).unwrap();
         let (aad, data_tag) = packet.split_at_mut(packet_used);
         let ciphertext = &mut data_tag[..buf_tag_start - packet_used];
-        trace!(
-            "decrypting: ct len {}, AAD len {}",
-            ciphertext.len(),
-            aad.len()
-        );
+        // trace!(
+        //     "decrypting: ct len {}, AAD len {}",
+        //     ciphertext.len(),
+        //     aad.len()
+        // );
         match crypto_ctx.open_in_place_detached(ciphertext, aad, &auth_tag) {
             Ok(_) => (),
             Err(e) => return Err(PacketError::CryptoErr(e)),
@@ -300,6 +306,14 @@ impl InProgressSession {
             out_of_order_packet_buffer: Vec::new(),
             last_packet_time: now,
         })
+    }
+
+    fn inc_progress_seq(&mut self) {
+        self.seq_to_make_progress += 1;
+        // trace!(
+        //     "increased seq to {} for session {}",
+        //     self.seq_to_make_progress, self.session_id
+        // );
     }
 
     // Merge an UninitSession into this one.
@@ -351,10 +365,15 @@ impl InProgressSession {
     }
 
     fn decrypt_packet(&mut self, packet: EncryptedPacket, now: Instant) {
+        let seq = packet.sequence_number;
         match packet.try_decrypt(&mut self.crypto_ctx, &mut self.command_buf) {
             Ok(_time) => {
+                trace!(
+                    "added decrypted packet {} to in-progress session {}",
+                    seq, self.session_id
+                );
                 self.last_packet_time = now;
-                self.seq_to_make_progress += 1;
+                self.inc_progress_seq();
             }
             Err(e) => error!("packet decryption error: {:?}", e),
         }
@@ -368,7 +387,7 @@ impl InProgressSession {
         match self.seq_to_make_progress.cmp(&packet.sequence_number) {
             Ordering::Less => {
                 trace!(
-                    "adding packet {} to session {} out-of-order buffer",
+                    "adding packet {} to in-progress session {} out-of-order buffer",
                     packet.sequence_number, self.session_id
                 );
                 self.out_of_order_packet_buffer.push(packet);
@@ -405,7 +424,7 @@ impl InProgressSession {
             }
             Err(e) => match e {
                 DeserializationError::CommandLenExpected | DeserializationError::LengthMismatch => {
-                    debug!("failed attempt to deserialize session: {:?}", e);
+                    // trace!("failed attempt to deserialize session: {:?}", e);
                     SessionStatus::Incomplete
                 }
                 err => {

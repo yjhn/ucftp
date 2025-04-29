@@ -8,6 +8,7 @@ use rand::CryptoRng;
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use raptorq;
 
 use ucftp_shared::serialise::dump_le;
 use ucftp_shared::*;
@@ -18,6 +19,9 @@ use std::net::SocketAddrV4;
 use std::net::UdpSocket;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 
 use message::UnlessAfter;
 use message::serialise_message;
@@ -35,6 +39,7 @@ pub struct PacketIter {
     encapped_key: EncappedKey,
     extensions: SessionExtensions,
     packet_size: u16,
+    regular_packet_data_size: u16,
     packet_buffer: Vec<u8>,
 }
 
@@ -58,6 +63,12 @@ impl PacketIter {
             encapped_key,
             extensions,
             packet_size,
+            regular_packet_data_size: packet_size
+                - 16 // auth tag
+                - 4  // time
+                - 1  // packet type
+                - 6  // sequence number
+                - 8, // session ID
             packet_buffer,
         }
     }
@@ -72,6 +83,8 @@ impl PacketIter {
         self.packet_sequence_number += 1;
         // Length depends on body length
         let packet_overhead = self.packet_buffer.len() as u16 + 4 + 16;
+        // dbg!(self.packet_size);
+        // dbg!(packet_overhead);
         let body_len = min(
             self.protocol_message.len() - self.protocol_message_used,
             (self.packet_size - packet_overhead) as usize,
@@ -80,6 +93,8 @@ impl PacketIter {
         // self.packet_buffer.extend_from_slice(&len.to_le_bytes());
         let aad_end = self.packet_buffer.len();
         // Send time. TODO(thesis): do we really need to encrypt the time?
+        // If we do not encrypt it, we get no benefit. Time still must be verified
+        // to be trustworthy
         let t: u32 = protocol_time();
         self.packet_buffer.extend_from_slice(&t.to_le_bytes());
         // Body. Encryption works in-place, so we first write plaintext data to
@@ -104,6 +119,80 @@ impl PacketIter {
         auth_tag.write_exact(&mut self.packet_buffer[data_end..]);
     }
 
+    fn fill_packet_buf(&mut self, buf: &mut Vec<u8>, buf_start: usize) {
+        // Session ID
+        dump_le(buf, self.session_id);
+        // Packet sequence number is a u48 stored in u64
+        buf.extend_from_slice(&self.packet_sequence_number.to_le_bytes()[..6]);
+        self.packet_sequence_number += 1;
+        // Length depends on body length
+        let packet_overhead = (buf.len() - buf_start) as u16 + 14 + 4 + 16;
+        // dbg!(self.packet_size);
+        // dbg!(packet_overhead);
+        let body_len = min(
+            self.protocol_message.len() - self.protocol_message_used,
+            (self.packet_size - packet_overhead) as usize,
+        );
+        let aad_end = buf.len();
+        let t: u32 = protocol_time();
+        buf.extend_from_slice(&t.to_le_bytes());
+        // Body. Encryption works in-place, so we first write plaintext data to
+        // the buffer and then encrypt it
+        buf.extend_from_slice(
+            &self.protocol_message
+                [self.protocol_message_used..self.protocol_message_used + body_len],
+        );
+        trace!(
+            "encrypted {} bytes, AAD len {} bytes",
+            buf.len() - aad_end,
+            aad_end - buf_start
+        );
+        self.protocol_message_used += body_len;
+        let (aad, data) = buf.split_at_mut(aad_end);
+        let auth_tag = self
+            .crypto_ctx
+            .seal_in_place_detached(data, &aad[buf_start..])
+            .unwrap();
+        // Auth tag
+        let data_end = buf.len();
+        for _ in 0..16u8 {
+            buf.push(0);
+        }
+        auth_tag.write_exact(&mut buf[data_end..]);
+    }
+
+    /// True = success, false = fail. Same as Some() and None for next_packet()
+    /// buf does not have to be empty
+    pub fn next_packet_buf(&mut self, buf: &mut Vec<u8>) -> bool {
+        if self.protocol_message_used == self.protocol_message.len() {
+            return false;
+        }
+
+        let start = buf.len();
+        if self.packet_sequence_number == 0 {
+            // First packet
+            // Protocol identifier
+            buf.extend_from_slice(PROTOCOL_IDENTIFIER);
+            let start_idx = buf.len();
+            for _ in 0..size_of::<EncappedKey>() {
+                buf.push(0);
+            }
+            self.encapped_key.write_exact(&mut buf[start_idx..]);
+            // Number of extensions
+            buf.push(0);
+            self.fill_packet_buf(buf, start);
+        } else if buf.len() - self.protocol_message_used <= self.regular_packet_data_size as usize {
+            buf.push(PacketType::LastData as u8);
+            self.fill_packet_buf(buf, buf.len() - 1);
+        } else {
+            buf.push(PacketType::RegularData as u8);
+            self.fill_packet_buf(buf, buf.len() - 1);
+        }
+        // TODO(thesis): what if first packet is also the last?
+
+        true
+    }
+
     pub fn next_packet(&mut self) -> Option<&[u8]> {
         if self.protocol_message_used == self.protocol_message.len() {
             return None;
@@ -122,26 +211,36 @@ impl PacketIter {
             // Number of extensions
             self.packet_buffer.push(0);
             self.fill_packet();
+        } else if self.protocol_message.len() - self.protocol_message_used
+            <= self.regular_packet_data_size as usize
+        {
+            self.packet_buffer.clear();
+            self.packet_buffer.push(PacketType::LastData as u8);
+            self.fill_packet();
         } else {
+            self.packet_buffer.clear();
             self.packet_buffer.push(PacketType::RegularData as u8);
             self.fill_packet();
         }
-        // TODO: determine last packet
-        // TODO(thesis): what if first packet is the last?
+        // TODO(thesis): what if first packet is also the last?
 
         Some(&self.packet_buffer)
     }
 }
 
+// RaptorQ FEC usage:
+// - collect all packets into an array
+// - special case: 1 packet - no FEC needed
+// - encode them with
 fn main() {
     env_logger::builder()
         .format_timestamp(None)
         .format_target(false)
         .write_style(WriteStyle::Always)
         .init();
-    info!("starting up");
     let cli = Cli::parse();
-    debug!("CLI args: {:?}", &cli);
+    info!("starting up");
+    debug!("args: {:?}", &cli);
     let cli::Cli {
         remote_ip,
         command,
@@ -152,6 +251,7 @@ fn main() {
         packet_size,
         sender_keys_dir,
         receiver_pk_file,
+        max_speed,
     } = cli;
 
     let protocol_message = serialise_message(
@@ -165,24 +265,222 @@ fn main() {
     );
 
     let mut rng = StdRng::from_os_rng();
-    let sock = bind_socket(&mut rng);
+    let receiver = SocketAddrV4::new(remote_ip, RECEIVER_PORT);
+    let sock = bind_socket(&mut rng, receiver);
 
     let (sender_sk, sender_pk, receiver_pk) = get_keys(sender_keys_dir, receiver_pk_file);
     let (encapped_key, crypto_ctx) =
         init_sender_crypto(&mut rng, sender_sk, sender_pk, &receiver_pk);
-    let mut packet_iter = PacketIter::new(
-        &mut rng,
-        protocol_message,
-        crypto_ctx,
-        encapped_key,
-        SessionExtensions {},
-        packet_size,
-    );
 
-    let receiver = SocketAddrV4::new(remote_ip, RECEIVER_PORT);
-    while let Some(packet) = packet_iter.next_packet() {
-        debug!("sending packet to {}", receiver);
-        sock.send_to(packet, receiver).unwrap();
+    let use_fec = true;
+    if !use_fec {
+        let mut packet_iter = PacketIter::new(
+            &mut rng,
+            protocol_message,
+            crypto_ctx,
+            encapped_key,
+            SessionExtensions {},
+            packet_size,
+        );
+        info!("sending command with session {}", packet_iter.session_id);
+
+        let send_start = Instant::now();
+        let mut total_bytes_sent = 0;
+        match max_speed {
+            // Apply throttling
+            Some(speed_kbps) => {
+                // We enforce speed limit in intervals of THROTTLE_TIME_STEP_MS
+                // KBPS * <ms_time_interval> = bytes/<ms_time_interval>
+                // TODO: make time step inversely proportional to speed
+                let throttle_time_step_ms = {
+                    let t = 20_000 / speed_kbps;
+                    if t == 0 { 1 } else { t }
+                };
+                debug!("using {}ms throttle time step", throttle_time_step_ms);
+                let desired_bytes = speed_kbps * throttle_time_step_ms;
+                let mut start = send_start;
+                let mut actual_bytes = 0;
+                while let Some(packet) = packet_iter.next_packet() {
+                    if actual_bytes > desired_bytes {
+                        let now = Instant::now();
+                        let duration = (now - start).as_millis() as u64;
+                        // Check if speed is greater than required
+                        if duration < throttle_time_step_ms as u64 {
+                            trace!(
+                                "throttling, {}ms quota filled in {}ms",
+                                throttle_time_step_ms, duration
+                            );
+                            // Sleep for the remainder of quota duration.
+                            // For some reason the total speed is much higher if the
+                            // duration is not multiplied by 2, even though I don't
+                            // know why that's the case
+                            thread::sleep(Duration::from_millis(
+                                (throttle_time_step_ms as u64 - duration) * 2,
+                            ));
+                        }
+                        trace!(
+                            "actual quota duration: {}ms, len: {} bytes",
+                            Instant::now().duration_since(start).as_millis(),
+                            actual_bytes
+                        );
+                        start = now;
+                        actual_bytes -= desired_bytes;
+                    }
+                    send_retry(&sock, packet);
+                    total_bytes_sent += packet.len();
+                    actual_bytes += packet.len() as u32;
+                }
+            }
+            None => {
+                while let Some(packet) = packet_iter.next_packet() {
+                    send_retry(&sock, packet);
+                    total_bytes_sent += packet.len();
+                }
+            }
+        }
+        let total_duration = Instant::now().duration_since(send_start);
+        let secs = total_duration.as_secs_f32();
+        let speed = total_bytes_sent as f32 / (secs * 1000.0);
+        info!("average send speed: {speed:.2} kB/s");
+        info!("command sent, shutting down");
+    } else {
+        let mut packet_iter = PacketIter::new(
+            &mut rng,
+            protocol_message,
+            crypto_ctx,
+            encapped_key,
+            SessionExtensions {},
+            packet_size
+                - 4  // raptorq adds 4 bytes of overhead to every packet
+                - 9, // FEC packets are 9 bytes larger than regular ones and must
+                     // still fit into the required size, so regular packets must
+                     // be 9 bytes shorter. TODO: is there a better way?
+        );
+        info!(
+            "sending command with session {}, using FEC",
+            packet_iter.session_id
+        );
+        let mut packets = Vec::with_capacity(
+            packet_iter.protocol_message.len() + packet_iter.protocol_message.len() / 10,
+        );
+        let mut type_session = [0; 9];
+        type_session[0] = PacketType::ErrorCorrection as u8;
+        type_session[1..].copy_from_slice(&packet_iter.session_id.to_le_bytes());
+        // Collect all packets
+        // First packet is special - it is not included in FEC, because it
+        // specifies FEC settings
+        let first_packet = packet_iter.next_packet().unwrap();
+        let send_start = Instant::now();
+        // TODO: what about packet types? It should probably remain the first packet byte. Otherwise we need to be very careful to not make init packet detection
+        // brittle (because 4 FEC bytes can be of any value), including UCFT
+        // TODO: FEC packets need their own packet type, also session ID and sequence number
+        send_retry(&sock, first_packet);
+        let mut total_bytes_sent = first_packet.len();
+        while packet_iter.next_packet_buf(&mut packets) {}
+        debug!("total packets len before FEC: {} bytes", packets.len());
+        // This is super slow in debug builds, but really fast in release
+        let fec_encoder = raptorq::Encoder::with_defaults(&packets, packet_size);
+        match max_speed {
+            // Apply throttling
+            Some(speed_kbps) => {
+                // We enforce speed limit in intervals of THROTTLE_TIME_STEP_MS
+                // KBPS * <ms_time_interval> = bytes/<ms_time_interval>
+                // TODO: make time step inversely proportional to speed
+                let throttle_time_step_ms = {
+                    let t = 20_000 / speed_kbps;
+                    if t == 0 { 1 } else { t }
+                };
+                debug!("using {}ms throttle time step", throttle_time_step_ms);
+                let desired_bytes = speed_kbps * throttle_time_step_ms;
+                let mut start = send_start;
+                let mut actual_bytes = 0;
+                // TODO: make overhead configurable
+                for packet in fec_encoder
+                    .get_encoded_packets(
+                        (packet_iter.packet_sequence_number
+                            + packet_iter.packet_sequence_number / 2)
+                            as u32,
+                    )
+                    .into_iter()
+                    .map(|p| {
+                        let mut ser = p.serialize();
+                        ser.splice(..0, type_session);
+                        ser
+                    })
+                {
+                    // while let Some(packet) = packet_iter.next_packet() {
+                    if actual_bytes > desired_bytes {
+                        let now = Instant::now();
+                        let duration = (now - start).as_millis() as u64;
+                        // Check if speed is greater than required
+                        if duration < throttle_time_step_ms as u64 {
+                            trace!(
+                                "throttling, {}ms quota filled in {}ms",
+                                throttle_time_step_ms, duration
+                            );
+                            // Sleep for the remainder of quota duration.
+                            // For some reason the total speed is much higher if the
+                            // duration is not multiplied by 2, even though I don't
+                            // know why that's the case
+                            thread::sleep(Duration::from_millis(
+                                (throttle_time_step_ms as u64 - duration) * 2,
+                            ));
+                        }
+                        trace!(
+                            "actual quota duration: {}ms, len: {} bytes",
+                            Instant::now().duration_since(start).as_millis(),
+                            actual_bytes
+                        );
+                        start = now;
+                        actual_bytes -= desired_bytes;
+                    }
+                    send_retry(&sock, &packet);
+                    total_bytes_sent += packet.len();
+                    actual_bytes += packet.len() as u32;
+                }
+            }
+            None => {
+                for packet in fec_encoder
+                    .get_encoded_packets(
+                        (packet_iter.packet_sequence_number
+                            + packet_iter.packet_sequence_number / 2)
+                            as u32,
+                    )
+                    .into_iter()
+                    .map(|p| {
+                        let mut ser = p.serialize();
+                        ser.splice(..0, type_session);
+                        ser
+                    })
+                {
+                    // while let Some(packet) = packet_iter.next_packet() {
+                    send_retry(&sock, &packet);
+                    total_bytes_sent += packet.len();
+                }
+            }
+        }
+        let total_duration = Instant::now().duration_since(send_start);
+        let secs = total_duration.as_secs_f32();
+        let speed = total_bytes_sent as f32 / (secs * 1000.0);
+        info!("average send speed: {speed:.2} kB/s");
+        info!("command sent, shutting down");
+    }
+}
+
+fn send_retry(socket: &UdpSocket, packet: &[u8]) {
+    trace!("sending packet");
+    loop {
+        match socket.send(packet) {
+            Ok(_) => {
+                // trace!("ok");
+                return;
+            }
+            Err(e) => {
+                warn!("error sending packet: {e}, retrying in 1s");
+                thread::sleep(Duration::from_secs(1));
+                return;
+            }
+        }
     }
 }
 
@@ -227,8 +525,8 @@ fn read_sender_keys(mut dir: PathBuf) -> (PrivateKey, PublicKey) {
     (sk, pk)
 }
 
-fn bind_socket(rng: &mut impl Rng) -> UdpSocket {
-    loop {
+fn bind_socket(rng: &mut impl Rng, receiver: SocketAddrV4) -> UdpSocket {
+    let socket = loop {
         let port: u16 = rng.random_range(1024..=u16::MAX);
         let socket = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
         match UdpSocket::bind(socket) {
@@ -238,5 +536,8 @@ fn bind_socket(rng: &mut impl Rng) -> UdpSocket {
             }
             Err(_) => continue,
         }
-    }
+    };
+    socket.connect(receiver).unwrap();
+    debug!("receiver: {}", receiver);
+    socket
 }

@@ -42,7 +42,7 @@ impl GlobalExecutor {
 
         // Try executing
         if command.can_execute(0) {
-            debug!("Executing command from session {}", command.session_id());
+            info!("executing command from session {}", command.session_id());
             let session_id = command.session_id();
             self.process_result(
                 command.execute_unchecked(&self.past_commands_data),
@@ -57,17 +57,17 @@ impl GlobalExecutor {
     fn process_result(&mut self, c: CommandExecutionResult, session_id: u64) {
         match c {
             CommandExecutionResult::Process(child) => {
-                debug!("successfully executed session {}", session_id);
+                info!("successfully executed session {}", session_id);
                 self.child_procs.push(child);
             }
             CommandExecutionResult::Success => {
-                debug!("successfully executed session {}", session_id)
+                info!("successfully executed session {}", session_id)
             }
             CommandExecutionResult::SuccessNoOp => {
-                debug!("successfully ignored session {}", session_id)
+                info!("successfully ignored session {}", session_id)
             }
             CommandExecutionResult::SuccessPath(p) => {
-                debug!(
+                info!(
                     "successfully executed session {}, storing path for later use",
                     session_id
                 );
