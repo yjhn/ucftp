@@ -386,6 +386,23 @@ fn main() {
                 // We enforce speed limit in intervals of THROTTLE_TIME_STEP_MS
                 // KBPS * <ms_time_interval> = bytes/<ms_time_interval>
                 // TODO: make time step inversely proportional to speed
+                // TODO(thesis): non-init packets will not include time field
+                // Reasoning:
+                // - session init packet must have time to detect replays
+                // - subsequent packets' decryption depends on the key from init
+                // - there is a truly negligible probability of randomly getting
+                //   the same keys for different sessions
+                // - without having the key, time cannot be reliably checked anyway
+                // - so if the replay attack happens:
+                //   - init packet replay will be detected, because it has a timestamp
+                //   - subsequent packets will be dropped if first one has old time
+                //   - if init packet is not received, subsequent packets will
+                //     be put in a session that will naturally time out without
+                //     decrypting them
+                //   - so there is no way to replay non-init packets without detection
+                //     assumbing no accidentally duplicate keys
+                //   - if session ID collision happens, it doesn't affect this
+                //     property, because packets will fail decryption
                 let throttle_time_step_ms = {
                     let t = 20_000 / speed_kbps;
                     if t == 0 { 1 } else { t }
@@ -403,8 +420,12 @@ fn main() {
                     )
                     .into_iter()
                     .map(|p| {
-                        let mut ser = p.serialize();
-                        ser.splice(..0, type_session);
+                        // Serialize manually. Taken from:
+                        // https://github.com/cberner/raptorq/blob/v2.0.0/src/base.rs#L85
+                        let mut ser = Vec::with_capacity(13 + p.data().len());
+                        ser.extend_from_slice(&type_session);
+                        ser.extend_from_slice(&p.payload_id().serialize());
+                        ser.extend_from_slice(p.data());
                         ser
                     })
                 {
@@ -448,8 +469,10 @@ fn main() {
                     )
                     .into_iter()
                     .map(|p| {
-                        let mut ser = p.serialize();
-                        ser.splice(..0, type_session);
+                        let mut ser = Vec::with_capacity(13 + p.data().len());
+                        ser.extend_from_slice(&type_session);
+                        ser.extend_from_slice(&p.payload_id().serialize());
+                        ser.extend_from_slice(p.data());
                         ser
                     })
                 {
