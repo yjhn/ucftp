@@ -30,7 +30,7 @@ pub struct Cli {
     /// this one
     #[arg(long = "awt", requires = "after_session_ids")]
     pub after_wait: Option<u32>,
-    /// Packet size to use. IP + UDP heaeders included
+    /// Packet size to use. IP + UDP headers included
     #[arg(short = 'p', default_value_t = SAFE_IP4_PACKET_SIZE)]
     pub packet_size: u16,
     /// Directory where the keys are stored. Key must be named sender_sk.pem
@@ -43,6 +43,12 @@ pub struct Cli {
     /// Maximum transfer speed in kB/s
     #[arg(short = 's')]
     pub max_speed: Option<u32>,
+    /// Use RaptorQ forward error correction
+    #[arg(long, default_value_t = false)]
+    pub fec: bool,
+    /// Forward error correction overhead, % of regular packets
+    #[arg(long = "fec-overhead", default_value_t = 10, requires = "fec")]
+    pub fec_overhead_percent: u16,
 }
 
 /// Protocol capabilities

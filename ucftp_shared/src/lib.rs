@@ -15,16 +15,27 @@ use hpke::aead::AesGcm128;
 use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
 use rand_core::CryptoRng;
+use serialise::BufSerialize;
+use serialise::DeserializationError;
 
 pub mod message;
 pub mod serialise;
 
 pub const PROTOCOL_IDENTIFIER: &[u8; 6] = b"UCFTP\x01";
 pub const PROTOCOL_INFO: &[u8] = b"UCFTP";
+// Equivalent to 2025-01-01 00:00:00 UTC
 pub const PROTOCOL_TIME_UNIX_EPOCH_OFFSET: u32 = 1735689600;
 pub const RECEIVER_PORT: u16 = 4321;
 pub const UDP_HEADER_SIZE: u16 = 8;
 pub const IP4_HEADER_SIZE: u16 = 20;
+pub const MIN_FIRST_PACKET_HEADER_SIZE: u16 = 6 // protocol identifier
+    + 1  // number of extensions (0 here)
+    + 32 // encapped key
+    + 8  // session ID
+    + 6; // packet sequence number
+pub const MIN_FIRST_PACKET_OVERHEAD: u16 = MIN_FIRST_PACKET_HEADER_SIZE
+    + 4   // time
+    + 16; // auth tag
 
 pub type ChosenKem = X25519HkdfSha256;
 pub type PrivateKey = <ChosenKem as hpke::Kem>::PrivateKey;
@@ -42,16 +53,48 @@ const _: () = if size_of::<hpke::aead::AeadTag<AesGcm128>>() != 16 {
     panic!()
 };
 
-// TODO: FEC as an extension?
-pub struct SessionExtensions {}
+#[derive(Debug, Clone, Copy)]
+pub enum SessionExtensions {
+    RaptorQ(raptorq::ObjectTransmissionInformation),
+}
 
-impl SessionExtensions {
-    pub fn empty() -> Self {
-        SessionExtensions {}
+impl BufSerialize for SessionExtensions {
+    fn serialize_to_buf(self, buf: &mut Vec<u8>) {
+        match self {
+            SessionExtensions::RaptorQ(oti) => {
+                buf.push(1);
+                buf.extend_from_slice(&oti.serialize());
+            }
+        }
     }
 }
 
-// TODO: FEC packets
+impl SessionExtensions {
+    // pub fn empty() -> Self {
+    //     SessionExtensions {}
+    // }
+
+    // TODO: allow at most 1 extension for now
+    pub fn from_buf(buf: &[u8]) -> Result<Self, DeserializationError> {
+        if buf.is_empty() {
+            return Err(DeserializationError::ValueExpected);
+        }
+        match buf[0] {
+            // RaptorQ
+            0 => {
+                if buf.len() < 13 {
+                    return Err(DeserializationError::IncompleteValue);
+                }
+                let oti = raptorq::ObjectTransmissionInformation::deserialize(
+                    buf[1..].first_chunk::<12>().unwrap(),
+                );
+                Ok(Self::RaptorQ(oti))
+            }
+            _ => Err(DeserializationError::UnknownEnumValue),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketType {
     FirstData = 0, // - first packet is indicated by protocol identifier

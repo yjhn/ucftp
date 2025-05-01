@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::Path;
 
 use crate::cli::Command;
-use log::{debug, error, info, trace, warn};
+use log::info;
 use ucftp_shared::serialise::{BufSerialize, dump_le};
 
 pub struct UnlessAfter {

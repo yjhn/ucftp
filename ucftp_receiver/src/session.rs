@@ -6,7 +6,8 @@ use hpke::HpkeError;
 use hpke::aead::AeadCtxR;
 use hpke::aead::AeadTag;
 use hpke::aead::AesGcm128;
-use log::{debug, error, info, trace, warn};
+use log::error;
+use log::{debug, trace};
 use ucftp_shared::serialise::*;
 use ucftp_shared::*;
 
@@ -24,7 +25,7 @@ const PACKET_SEND_TIMEOUT: u32 = 400;
 // packet decryptions before discarding the session
 const PROGRESS_TIMEOUT: u64 = 40;
 
-const MIN_FIRST_PACKET_LEN: u16 = 6 // protocol ID
+pub const MIN_FIRST_PACKET_LEN: u16 = 6 // protocol ID
     + 32  // encapped key
     + 1   // number of extensions
     + 8   // session ID
@@ -32,7 +33,7 @@ const MIN_FIRST_PACKET_LEN: u16 = 6 // protocol ID
     + 4   // send time
     + 9   // at least message len + 1 byte of actual content
     + 16; // auth tag
-const MIN_PACKET_LEN: u16 = 1 // packet type
+pub const MIN_PACKET_LEN: u16 = 1 // packet type
     + 8   // session ID
     + 6   // sequence number
     + 4   // send time
@@ -97,7 +98,7 @@ impl EncryptedPacket {
         mut self,
         crypto_ctx: &mut CryptoCtx,
         buf: &mut Vec<u8>,
-    ) -> Result<u32, PacketError> {
+    ) -> Result<(), PacketError> {
         // Recreate AAD, structure:
         // - packet type
         // - session ID
@@ -116,13 +117,15 @@ impl EncryptedPacket {
             Ok(_) => {
                 // Clean up AAD
                 buf.truncate(buf.len() - 15);
-                let time = u32_from_le_bytes(&self.encrypted_data);
-                if packet_send_timeout(time) {
-                    Err(PacketError::TooOld)
-                } else {
-                    buf.extend_from_slice(&self.encrypted_data[4..]);
-                    Ok(time)
-                }
+                // let time = u32_from_le_bytes(&self.encrypted_data);
+                // if packet_send_timeout(time) {
+                //     Err(PacketError::TooOld)
+                // } else {
+                // buf.extend_from_slice(&self.encrypted_data[4..]);
+                // Ok(time)
+                // }
+                buf.extend_from_slice(&self.encrypted_data);
+                Ok(())
             }
             Err(e) => {
                 // Clean up AAD
@@ -192,11 +195,64 @@ impl UninitSession {
     }
 }
 
+pub struct UninitFecSession {
+    session_id: u64,
+    // No packets can be decrypted without the first packet
+    // TODO(thesis): mention this limitation and that it cannot be
+    // removed without relying on possibly attacker-controlled and unverified
+    // data (because we cannot verify contents without the keys)
+    fec_packet_buf: Vec<raptorq::EncodingPacket>,
+    // Packet send time is encrypted. Even if it was not encrypted, we
+    // could not trust it, because we can't verify its correctness until
+    // we get the first packet. So the timeout logic in this case works
+    // as follows: first session packet must arrive within 30 seconds of the
+    // first received packet. Otherwise this session is discarded
+    init_time: Instant,
+}
+
+impl UninitFecSession {
+    pub fn from_packet(packet: raptorq::EncodingPacket, session_id: u64) -> Self {
+        UninitFecSession {
+            session_id,
+            fec_packet_buf: vec![packet],
+            init_time: Instant::now(),
+        }
+    }
+
+    pub fn session_id(&self) -> u64 {
+        self.session_id
+    }
+
+    /// Checks if progress timeout has occured. More specifically,
+    /// progress means packet decryption.
+    pub fn progress_timeout(&self) -> bool {
+        let t = Instant::now();
+        self.progress_timeout_from(t)
+    }
+
+    pub fn progress_timeout_from(&self, now: Instant) -> bool {
+        (now - self.progress_time()).as_secs() > PROGRESS_TIMEOUT
+    }
+
+    /// Time first packet for this session arrived
+    pub fn progress_time(&self) -> Instant {
+        self.init_time
+    }
+
+    pub fn add_packet(&mut self, packet: raptorq::EncodingPacket, session_id: u64) {
+        debug_assert_eq!(self.session_id(), session_id);
+        debug_assert!((Instant::now() - self.progress_time()).as_secs() < PROGRESS_TIMEOUT + 5);
+
+        trace!("added packet to uninit FEC session {}", self.session_id);
+        self.fec_packet_buf.push(packet);
+    }
+}
+
 pub struct InProgressSession {
     // Will only be needed if rekeying is implemented
     sender_pk: PublicKey,
     session_id: u64,
-    session_extensions: SessionExtensions,
+    // session_extensions: SessionExtensions,
     // sequence number of first packet is always 0 - TODO(thesis): it is
     // probably a good idea to allow packet numbers to start from
     // arbitrary value, as long as they will not overflow the counter - or
@@ -230,15 +286,22 @@ impl InProgressSession {
         //   - unknown message type
         //   - incorrect length
         // misc corruption (e.g. length incorrect)
-        if packet.len() < MIN_FIRST_PACKET_LEN as usize {
-            return Err(PacketError::Incomplete);
-        }
+        // if packet.len() < MIN_FIRST_PACKET_LEN as usize {
+        //     return Err(PacketError::Incomplete);
+        // }
 
         // Check header
         if &packet[..6] != PROTOCOL_IDENTIFIER {
             return Err(PacketError::WrongPacketType);
         }
         let mut packet_used = 6;
+
+        // Extensions. InProgressSession does not support any
+        if packet[packet_used] > 0 {
+            return Err(PacketError::UnknownExtensions);
+        }
+        packet_used += 1;
+
         // Encapsulated key
         // Try decapsulation using every known sender key
         // TODO: is there a better method?
@@ -252,12 +315,6 @@ impl InProgressSession {
             None => return Err(PacketError::CryptoErr(HpkeError::DecapError)),
         };
         packet_used += 32;
-
-        // Extensions. We don't support any
-        if packet[packet_used] != 0 {
-            return Err(PacketError::UnknownExtensions);
-        }
-        packet_used += 1;
 
         // Session ID
         let session_id = u64_from_le_bytes(&packet[packet_used..]);
@@ -298,7 +355,6 @@ impl InProgressSession {
         Ok(InProgressSession {
             sender_pk,
             session_id,
-            session_extensions: SessionExtensions::empty(),
             crypto_ctx,
             sequence_number_start: sequence_number,
             command_buf: decrypted_data,
@@ -326,7 +382,7 @@ impl InProgressSession {
     #[must_use]
     pub fn merge(&mut self, mut uninit_session: UninitSession, now: Instant) -> SessionStatus {
         debug_assert_eq!(self.session_id, uninit_session.session_id);
-        debug_assert!((Instant::now() - self.progress_time()).as_secs() < PROGRESS_TIMEOUT + 5);
+        debug_assert!((now - self.progress_time()).as_secs() < PROGRESS_TIMEOUT + 5);
         debug_assert!(self.out_of_order_packet_buffer.is_empty());
         debug_assert!(self.last_packet_time >= uninit_session.init_time);
         // Sort packets by sequence number
@@ -340,7 +396,6 @@ impl InProgressSession {
         }
 
         self.out_of_order_packet_buffer = uninit_session.packet_buf;
-
         self.session_status()
     }
 
@@ -367,7 +422,7 @@ impl InProgressSession {
     fn decrypt_packet(&mut self, packet: EncryptedPacket, now: Instant) {
         let seq = packet.sequence_number;
         match packet.try_decrypt(&mut self.crypto_ctx, &mut self.command_buf) {
-            Ok(_time) => {
+            Ok(_) => {
                 trace!(
                     "added decrypted packet {} to in-progress session {}",
                     seq, self.session_id
@@ -408,6 +463,26 @@ impl InProgressSession {
         }
     }
 
+    // TODO(thesis): reasons to use/not use FEC:
+    // - for:
+    //   - packet loss tolerance
+    // - against:
+    //   - additional computation for encoder and decoder, especially for long
+    //     messages
+    //   - session timeouts are hard - they cannot rely on progress timeouts,
+    //     because decryption is done all at the same time. This means that
+    //     it is unclear when session can be declared as timed out - attacker
+    //     can feed packets one by one, exhausting receiver's memory. But timeouts
+    //     are also necessary in regular situations - sender process can be
+    //     killed in the middle of transfer - idea: dynamic timeout based on
+    //     the total command length from first packet (the longer the command,
+    //     the longer the timeout). Also, there should be a timeout of like 10s
+    //     after the first packet for the init packet to arrive
+    //   - higher memory usage, as the whole command has to be fully received
+    //     before being able to revocer the data. Note that this only applies if
+    //     the regular implementation is optimized to not store all the data
+    //     in memory (i.e. write file piece by piece as they are received)
+
     /// Check if this session is complete
     // TODO(thesis): add that total length field really helps with detecting when
     // the command has been fully received
@@ -438,7 +513,9 @@ impl InProgressSession {
 
 pub enum SessionStatus {
     Complete(CommandExecutor),
+    /// More packets needed to complete the session
     Incomplete,
+    /// Session is useless and should be discarded
     Corrupt,
 }
 
@@ -447,10 +524,243 @@ pub enum PacketError {
     Corrupt,
     WrongSession,
     NewSession,
+    ExpectedFecExtension,
     WrongPacketType,
     UnknownPacketType,
     CryptoErr(HpkeError),
     UnknownExtensions,
     Incomplete,
     TooOld,
+    DeserializationErr(DeserializationError),
+}
+
+pub struct InProgressFecSession {
+    // TODO(thesis): to implement rekeying, we would need to split packets into
+    // groups with identifiers or possibly by packet number. Without groups or seq
+    // identifiers for each packet (including FEC packets), it is impossible to
+    // determine which key group packet belongs to
+    // Will only be needed if rekeying is implemented
+    sender_pk: PublicKey,
+    session_id: u64,
+    command_buf: Vec<u8>,
+    first_packet_time: Instant,
+    crypto_ctx: CryptoCtx,
+    fec_decoder: raptorq::Decoder,
+}
+
+impl InProgressFecSession {
+    // Try decoding and decrypting the first session packet. May overwrite
+    // encrypted data, so buf must not be read from after calling this
+    /// To decide whether to create InProgressSession or InProgressFecSession,
+    /// caller can look at first (type) and seventh (extension count) bytes
+    #[must_use]
+    pub fn try_from_init_packet_buf(
+        packet: &mut [u8],
+        sender_pks: &[PublicKey],
+        receiver_sk: &PrivateKey,
+    ) -> Result<Self, PacketError> {
+        trace!("InProgressFecSession being created");
+        let now = Instant::now();
+        // if packet.len() < MIN_FIRST_PACKET_LEN as usize {
+        //     return Err(PacketError::Incomplete);
+        // }
+
+        // Check header
+        if &packet[..6] != PROTOCOL_IDENTIFIER {
+            return Err(PacketError::WrongPacketType);
+        }
+        let mut packet_used = 6;
+        // Extensions. Currently we only support one: RaptorQ FEC
+        // TODO(thesis): move extensions header before encapped key
+        let fec_decoder = match packet[packet_used] {
+            0 => return Err(PacketError::ExpectedFecExtension),
+            1 => match SessionExtensions::from_buf(&packet[packet_used + 1..]) {
+                Ok(ext) => match ext {
+                    SessionExtensions::RaptorQ(object_transmission_information) => {
+                        packet_used += 13;
+                        raptorq::Decoder::new(object_transmission_information)
+                    }
+                },
+                Err(e) => return Err(PacketError::DeserializationErr(e)),
+            },
+            _ => return Err(PacketError::UnknownExtensions),
+        };
+        packet_used += 1;
+        // TODO: we may read out of bounds later if extensions are present
+
+        // Encapsulated key
+        // Try decapsulation using every known sender key
+        // TODO: is there a better method?
+        // This will never fail, as we are using x25519_dalek, which
+        // has infallible key deserialisation
+        let encapped_key = EncappedKey::from_bytes(&packet[packet_used..packet_used + 32]).unwrap();
+        let (mut crypto_ctx, sender_pk) = match sender_pks.iter().cloned().find_map(|pk| {
+            try_decapsulate_key(pk.clone(), receiver_sk, &encapped_key).map(|c| (c, pk))
+        }) {
+            Some(crypto_ctx) => crypto_ctx,
+            None => return Err(PacketError::CryptoErr(HpkeError::DecapError)),
+        };
+        packet_used += 32;
+
+        // Session ID
+        let session_id = u64_from_le_bytes(&packet[packet_used..]);
+        packet_used += 8;
+
+        // Decrypt data
+        // If decryption is unsuccessful, this may corrupt the ciphertext.
+        // But since this is the first packet and the key has been
+        // successfully decapped, this packet will be discarded if we fail
+        // decryption anyway, so this doesn't matter
+        let buf_tag_start = packet.len() - 16;
+        let auth_tag = AeadTag::from_bytes(&packet[buf_tag_start..]).unwrap();
+        let (aad, data_tag) = packet.split_at_mut(packet_used);
+        let ciphertext = &mut data_tag[..buf_tag_start - packet_used];
+        // trace!(
+        //     "decrypting: ct len {}, AAD len {}",
+        //     ciphertext.len(),
+        //     aad.len()
+        // );
+        match crypto_ctx.open_in_place_detached(ciphertext, aad, &auth_tag) {
+            Ok(_) => (),
+            Err(e) => return Err(PacketError::CryptoErr(e)),
+        }
+
+        let send_time = u32_from_le_bytes(&packet[packet_used..]);
+        packet_used += 4;
+        if packet_send_timeout(send_time) {
+            return Err(PacketError::TooOld);
+        }
+
+        // Allocate storage for the protocol message
+        let decrypted_data = Vec::from(&packet[packet_used..buf_tag_start]);
+
+        Ok(InProgressFecSession {
+            sender_pk,
+            session_id,
+            crypto_ctx,
+            command_buf: decrypted_data,
+            first_packet_time: now,
+            fec_decoder,
+        })
+    }
+
+    // Merge an UninitSession into this one.
+    // Preconditions:
+    // - session IDs must match
+    // - progress timeout must not have passed
+    #[must_use]
+    pub fn merge(&mut self, mut uninit_session: UninitFecSession, now: Instant) -> SessionStatus {
+        debug_assert_eq!(self.session_id, uninit_session.session_id);
+        debug_assert!((now - self.progress_time()).as_secs() < PROGRESS_TIMEOUT + 5);
+
+        for p in uninit_session.fec_packet_buf.drain(..) {
+            self.fec_decoder.add_new_packet(p);
+        }
+        self.session_status()
+    }
+
+    pub fn session_id(&self) -> u64 {
+        self.session_id
+    }
+
+    /// Checks if progress timeout has occured. More specifically,
+    /// progress means packet decryption.
+    pub fn progress_timeout(&self) -> bool {
+        let t = Instant::now();
+        self.progress_timeout_from(t)
+    }
+
+    pub fn progress_timeout_from(&self, now: Instant) -> bool {
+        (now - self.progress_time()).as_secs() > PROGRESS_TIMEOUT
+    }
+
+    /// Time a packet was last successfully decrypted
+    pub fn progress_time(&self) -> Instant {
+        self.first_packet_time
+    }
+
+    // TODO(thesis): reasons to use/not use FEC:
+    // - for:
+    //   - packet loss tolerance
+    // - against:
+    //   - additional computation for encoder and decoder, especially for long
+    //     messages
+    //   - higher memory usage, as the whole command has to be fully received
+    //     before being able to revocer the data. Note that this only applies if
+    //     the regular implementation is optimized to not store all the data
+    //     in memory (i.e. write file piece by piece as they are received)
+    #[must_use]
+    pub fn add_packet(
+        &mut self,
+        packet: raptorq::EncodingPacket,
+        session_id: u64,
+        now: Instant,
+    ) -> SessionStatus {
+        debug_assert_eq!(self.session_id(), session_id);
+        debug_assert!((now - self.progress_time()).as_secs() < PROGRESS_TIMEOUT + 5);
+        trace!(
+            "adding FEC packet to in-progress FEC session {}",
+            self.session_id
+        );
+        self.fec_decoder.add_new_packet(packet);
+        self.session_status()
+    }
+
+    /// Check if this session is complete
+    #[must_use]
+    pub fn session_status(&mut self) -> SessionStatus {
+        // Strategies to check if complete:
+        // - all packet numbers first..=last have been received (last here means
+        //   packet with last session packet type)
+        // - command parsing does not fail
+        // TODO: FEC, decrypt all data in one go
+        match self.fec_decoder.get_result() {
+            Some(data) => {
+                let len = self.command_buf.len();
+                self.command_buf.extend_from_slice(&data[..data.len() - 16]);
+                let auth_tag = AeadTag::from_bytes(&data[data.len() - 16..]).unwrap();
+                match self.crypto_ctx.open_in_place_detached(
+                    &mut self.command_buf[len..],
+                    &self.session_id.to_le_bytes(),
+                    &auth_tag,
+                ) {
+                    Ok(_) => {
+                        match CommandExecutor::new(&self.command_buf, self.session_id) {
+                            Ok(command) => {
+                                debug!("received full command for session {}", self.session_id());
+                                SessionStatus::Complete(command)
+                            }
+                            Err(e) => match e {
+                                DeserializationError::CommandLenExpected
+                                | DeserializationError::LengthMismatch => {
+                                    // trace!("failed attempt to deserialize session: {:?}", e);
+                                    SessionStatus::Incomplete
+                                }
+                                err => {
+                                    error!("error parsing command: {:?}", err);
+                                    SessionStatus::Corrupt
+                                }
+                            },
+                        }
+                    }
+                    Err(_) => {
+                        // TODO: what to do in this case? Just clear the buffer and
+                        // wait for more packets? Declare failure and destroy session?
+                        // Maybe just wait until timeout for new packets - TODO(thesis) - this will not work, as we already satisfied the decoder's
+                        // requirements, so nothing to be gained there. So this should
+                        // probably just be reported as an error and that's it
+                        // TODO(thesis): this is one weakness of current
+                        // usage of FEC. Even one well-crafted corrupt packet can
+                        // make the whole stream decode incorrectly, thus giving
+                        // attackers quite good DOS opportunities
+                        // One way to mitigate this is to use something like HMAC
+                        // to integrity-protect FEC packets (encryption is not needed,
+                        // as the underlying data is already encrypted)
+                        SessionStatus::Corrupt
+                    }
+                }
+            }
+            None => SessionStatus::Incomplete,
+        }
+    }
 }
