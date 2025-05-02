@@ -17,6 +17,7 @@ use hpke::kem::X25519HkdfSha256;
 use rand_core::CryptoRng;
 use serialise::BufSerialize;
 use serialise::DeserializationError;
+use serialise::TryBufDeserialize;
 
 pub mod message;
 pub mod serialise;
@@ -62,20 +63,17 @@ impl BufSerialize for SessionExtensions {
     fn serialize_to_buf(self, buf: &mut Vec<u8>) {
         match self {
             SessionExtensions::RaptorQ(oti) => {
-                buf.push(1);
+                buf.push(0);
                 buf.extend_from_slice(&oti.serialize());
             }
         }
     }
 }
 
-impl SessionExtensions {
-    // pub fn empty() -> Self {
-    //     SessionExtensions {}
-    // }
-
-    // TODO: allow at most 1 extension for now
-    pub fn from_buf(buf: &[u8]) -> Result<Self, DeserializationError> {
+impl TryBufDeserialize for SessionExtensions {
+    fn try_deserialize_from_buf(buf: &[u8]) -> Result<(usize, Self), DeserializationError> {
+        // TODO(thesis): note that packet parsing must fail upon encountering unknown
+        // extensions
         if buf.is_empty() {
             return Err(DeserializationError::ValueExpected);
         }
@@ -88,7 +86,7 @@ impl SessionExtensions {
                 let oti = raptorq::ObjectTransmissionInformation::deserialize(
                     buf[1..].first_chunk::<12>().unwrap(),
                 );
-                Ok(Self::RaptorQ(oti))
+                Ok((13, Self::RaptorQ(oti)))
             }
             _ => Err(DeserializationError::UnknownEnumValue),
         }

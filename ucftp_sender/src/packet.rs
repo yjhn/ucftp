@@ -53,15 +53,19 @@ impl PacketIter {
         }
     }
 
-    // TODO(thesis): include total session plaintext length as the first session field
+    // TODO(thesis): include total session plaintext length as the first message field
     fn fill_packet(&mut self) {
         // Session ID
         dump_le(&mut self.packet_buffer, self.session_id);
         // Packet sequence number is a u48 stored in u64
+        // TODO(thesis): also encrypt first packet sequence number. Philosophy:
+        // encrypt everything possible so that decryption is still possible
         self.packet_buffer
             .extend_from_slice(&self.packet_sequence_number.to_le_bytes()[..6]);
         self.packet_sequence_number += 1;
+
         let aad_end = self.packet_buffer.len();
+
         // Only the first packet has time field
         if self.packet_sequence_number == 1 {
             // Send time. TODO(thesis): do we really need to encrypt the time?
@@ -97,80 +101,6 @@ impl PacketIter {
         auth_tag.write_exact(&mut self.packet_buffer[data_end..]);
     }
 
-    fn fill_packet_buf(&mut self, buf: &mut Vec<u8>, buf_start: usize) {
-        // Session ID
-        dump_le(buf, self.session_id);
-        // Packet sequence number is a u48 stored in u64
-        buf.extend_from_slice(&self.packet_sequence_number.to_le_bytes()[..6]);
-        self.packet_sequence_number += 1;
-        let aad_end = buf.len();
-        // Only the first packet has time field
-        if self.packet_sequence_number == 1 {
-            let t: u32 = protocol_time();
-            buf.extend_from_slice(&t.to_le_bytes());
-        }
-        let packet_overhead = (buf.len() - buf_start) as u16 + 16;
-        let body_len = min(
-            self.protocol_message.len() - self.protocol_message_used,
-            (self.packet_size - packet_overhead) as usize,
-        );
-        // Body. Encryption works in-place, so we first write plaintext data to
-        // the buffer and then encrypt it
-        buf.extend_from_slice(
-            &self.protocol_message
-                [self.protocol_message_used..self.protocol_message_used + body_len],
-        );
-        trace!(
-            "encrypted {} bytes, AAD len {} bytes",
-            buf.len() - aad_end,
-            aad_end - buf_start
-        );
-        self.protocol_message_used += body_len;
-        let (aad, data) = buf.split_at_mut(aad_end);
-        let auth_tag = self
-            .crypto_ctx
-            .seal_in_place_detached(data, &aad[buf_start..])
-            .unwrap();
-        // Auth tag
-        let data_end = buf.len();
-        for _ in 0..16u8 {
-            buf.push(0);
-        }
-        auth_tag.write_exact(&mut buf[data_end..]);
-    }
-
-    /// True = success, false = fail. Same as Some() and None for next_packet()
-    /// buf does not have to be empty
-    pub fn next_packet_buf(&mut self, buf: &mut Vec<u8>) -> bool {
-        if self.protocol_message_used == self.protocol_message.len() {
-            return false;
-        }
-
-        let start = buf.len();
-        if self.packet_sequence_number == 0 {
-            // First packet
-            // Protocol identifier
-            buf.extend_from_slice(PROTOCOL_IDENTIFIER);
-            let start_idx = buf.len();
-            for _ in 0..size_of::<EncappedKey>() {
-                buf.push(0);
-            }
-            self.encapped_key.write_exact(&mut buf[start_idx..]);
-            // Number of extensions
-            buf.push(0);
-            self.fill_packet_buf(buf, start);
-        } else if buf.len() - self.protocol_message_used <= self.regular_packet_data_size as usize {
-            buf.push(PacketType::LastData as u8);
-            self.fill_packet_buf(buf, buf.len() - 1);
-        } else {
-            buf.push(PacketType::RegularData as u8);
-            self.fill_packet_buf(buf, buf.len() - 1);
-        }
-        // TODO(thesis): what if first packet is also the last?
-
-        true
-    }
-
     pub fn next_packet(&mut self) -> Option<&[u8]> {
         if self.protocol_message_used == self.protocol_message.len() {
             return None;
@@ -180,10 +110,14 @@ impl PacketIter {
             // First packet
             // Protocol identifier
             self.packet_buffer.extend_from_slice(PROTOCOL_IDENTIFIER);
+            // TODO: if session has only one packet, we don't need packet seq. But
+            // then we need to indicate that this is the only packet
+            // Maybe use 3 most significant bits of extension count to indicate packet
+            // type, then we don't need any additional bytes
             // Number of extensions
             self.packet_buffer.push(0);
             let start_idx = self.packet_buffer.len();
-            for _ in 0..size_of::<EncappedKey>() {
+            for _ in 0..32 {
                 self.packet_buffer.push(0);
             }
             self.encapped_key
@@ -230,66 +164,69 @@ impl FecPacketIter {
         let first_packet_overhead = MIN_FIRST_PACKET_OVERHEAD
             + 1   // extension type
             + 12; // extension (raptorq config)
-        let max_first_packet_data_size = packet_size - first_packet_overhead;
-        debug_assert!(max_first_packet_data_size as usize >= protocol_message.len());
+        let first_packet_data_size = (packet_size - first_packet_overhead) as usize;
+        debug_assert!((first_packet_data_size as usize) < protocol_message.len());
 
         let mut first_packet = Vec::with_capacity(packet_size as usize);
         // Protocol identifier
         first_packet.extend_from_slice(PROTOCOL_IDENTIFIER);
+
+        // Number of extensions
+        first_packet.push(1);
+        // Extensions
+        let oti = raptorq::ObjectTransmissionInformation::with_defaults(
+            (protocol_message.len() - first_packet_data_size + 16) as u64,
+            packet_size - FEC_PACKET_OVERHEAD,
+        );
+        let ext = SessionExtensions::RaptorQ(oti);
+        ext.serialize_to_buf(&mut first_packet);
+
+        // Encapped key
         let start_idx = first_packet.len();
-        for _ in 0..size_of::<EncappedKey>() {
+        for _ in 0..32u8 {
             first_packet.push(0);
         }
         encapped_key.write_exact(&mut first_packet[start_idx..]);
-        // Number of extensions
-        first_packet.push(1);
-        // Encrypt the remaining data
-        // TODO: encrypt the whole thing, TODO(thesis): AAD is session ID
-        let fec_encoder = {
-            let auth_tag = crypto_ctx
-                .seal_in_place_detached(
-                    &mut protocol_message[max_first_packet_data_size as usize..],
-                    &session_id.to_le_bytes(),
-                )
-                .unwrap();
-            debug!(
-                "encrypted the remaining message: {} bytes",
-                max_first_packet_data_size,
-            );
-            // Auth tag
-            let data_end = protocol_message.len();
-            for _ in 0..16u8 {
-                protocol_message.push(0);
-            }
-            auth_tag.write_exact(&mut protocol_message[data_end..]);
-            raptorq::Encoder::with_defaults(
-                &protocol_message[max_first_packet_data_size as usize..],
-                packet_size - FEC_PACKET_OVERHEAD,
-            )
-        };
-        let ext = SessionExtensions::RaptorQ(fec_encoder.get_config());
-        ext.serialize_to_buf(&mut first_packet);
 
         // Session ID
+        // TODO(thesis): don't move session ID and packet seq before encapped key
+        // Logic: encapped key should be in front to minimise error detection time:
+        // decap can fail
+        // This also allows all packets to have almost everything identical starting with
+        // session ID (session ID, seq, (time for init only), ciphertext, auth tag)
+        // TODO: maybe also encrypt session ID of first packet?
         dump_le(&mut first_packet, session_id);
-        // Packet sequence number is a u48 stored in u64
-        first_packet.extend_from_slice(&0u64.to_le_bytes()[..6]);
+
+        // TODO(thesis): FEC init packet does not need a sequence number
+        // Take this into account when calculating packet overhead size
+
+        // This is AAD end. TODO(thesis): specify precisely what is included in AAD for each
+        // type of packet and why
         let aad_end = first_packet.len();
+
         // Time
         let t: u32 = protocol_time();
         first_packet.extend_from_slice(&t.to_le_bytes());
 
-        let body_len = max_first_packet_data_size as usize;
+        // TODO(thesis): idea - split FEC session into multiple parts to allow
+        // not keeping the whole session in memory at once. But then we need to
+        // track all the parts of the session somehow
+        // Maybe add add "part number" in front of ecnrypted data in FEC? But we still
+        // need to somehow identify which FEC packets belong to which part
+        // TODO: think about this
+
         // Body. Encryption works in-place, so we first write plaintext data to
         // the buffer and then encrypt it
-        first_packet.extend_from_slice(&protocol_message[..body_len]);
+        first_packet.extend_from_slice(&protocol_message[..first_packet_data_size as usize]);
         let (aad, data) = first_packet.split_at_mut(aad_end);
+
         let auth_tag = crypto_ctx.seal_in_place_detached(data, aad).unwrap();
         trace!(
             "encrypted {} bytes, AAD len {} bytes",
-            max_first_packet_data_size + 4,
-            aad_end
+            data.len(),
+            aad.len()
         );
+
         // Auth tag
         let data_end = first_packet.len();
         for _ in 0..16u8 {
@@ -297,10 +234,33 @@ impl FecPacketIter {
         }
         auth_tag.write_exact(&mut first_packet[data_end..]);
 
+        // Encrypt the remaining data
+        // TODO(thesis): we encrypt the whole remaining data in one go, AAD is session ID
+        let fec_encoder = {
+            // This encryption MUST happen after first packet encryption. Encryption
+            // order matters.
+            let auth_tag = crypto_ctx
+                .seal_in_place_detached(
+                    &mut protocol_message[first_packet_data_size as usize..],
+                    &session_id.to_le_bytes(),
+                )
+                .unwrap();
+            debug!(
+                "encrypted the remaining message: {} bytes",
+                protocol_message.len() - first_packet_data_size as usize,
+            );
+            // Auth tag
+            let data_end = protocol_message.len();
+            for _ in 0..16u8 {
+                protocol_message.push(0);
+            }
+            auth_tag.write_exact(&mut protocol_message[data_end..]);
+            raptorq::Encoder::new(&protocol_message[first_packet_data_size..], oti)
+        };
         let packets = {
-            let source_packets = (protocol_message.len() - max_first_packet_data_size as usize)
+            let source_packets = (protocol_message.len() - first_packet_data_size as usize)
                 .div_ceil(packet_size as usize) as u32;
-            // TODO(thesis): what to do if there is only one packet? Do we add another
+            // TODO(thesis): what to do if there is only one FEC packet? Do we add another
             // FEC packet always or only if fec_overhead_percent >= 100? 50?
             fec_encoder.get_encoded_packets(source_packets * fec_overhead_percent as u32 / 100)
         };
@@ -330,6 +290,7 @@ impl FecPacketIter {
         // Serialize manually. Taken from:
         // https://github.com/cberner/raptorq/blob/v2.0.0/src/base.rs#L85
         buf.push(PacketType::ErrorCorrection as u8);
+        buf.extend_from_slice(&self.session_id.to_le_bytes());
         buf.extend_from_slice(&packet.payload_id().serialize());
         buf.extend_from_slice(packet.data());
         self.packets_sent += 1;

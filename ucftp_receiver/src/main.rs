@@ -39,7 +39,7 @@ fn main() {
         .format_timestamp(None)
         .format_target(false)
         .write_style(WriteStyle::Always)
-        .filter_level(log::LevelFilter::Trace)
+        .filter_level(log::LevelFilter::max())
         .parse_default_env()
         .init();
 
@@ -97,7 +97,7 @@ fn get_keys(
             Err(_) => continue,
         };
         sender_keys.push(k);
-        debug!("read sender key {}", p.display());
+        debug!("read sender key from '{}'", p.display());
     }
 
     (receiver_sk, sender_keys)
@@ -174,11 +174,11 @@ impl Receiver {
                     error!("packet too short");
                     return None;
                 }
-                match packet[7] {
+                match packet[6] {
                     0 => self.handle_session_init_packet(&mut packet),
                     1 => self.handle_fec_session_init_packet(&mut packet),
                     _ => {
-                        error!("unsupported extensions");
+                        error!("unsupported extensions, extension count: {}", packet[6]);
                         None
                     }
                 }
@@ -188,7 +188,7 @@ impl Receiver {
                 let packet = match EncryptedPacket::try_from_buf(&packet[1..], packet_type) {
                     Ok(p) => p,
                     Err(e) => {
-                        warn!("failed to parse packet: {:?}", e);
+                        warn!("failed to parse regular packet: {:?}", e);
                         return None;
                     }
                 };
@@ -305,7 +305,7 @@ impl Receiver {
                 }
             }
             Err(e) => {
-                error!("failed to parse packet: {:?}", e);
+                error!("failed to parse init packet: {:?}", e);
                 return None;
             }
         };
@@ -391,7 +391,10 @@ impl Receiver {
             &self.receiver_sk,
         ) {
             Ok(mut p) => {
-                trace!("init data packet received for session {}", p.session_id());
+                trace!(
+                    "init data packet received for FEC session {}",
+                    p.session_id()
+                );
                 match p.session_status() {
                     SessionStatus::Complete(command_executor) => {
                         return Some(command_executor);
@@ -402,7 +405,7 @@ impl Receiver {
                 }
             }
             Err(e) => {
-                error!("failed to parse packet: {:?}", e);
+                error!("failed to parse FEC init packet: {:?}", e);
                 return None;
             }
         };
@@ -413,7 +416,7 @@ impl Receiver {
         // duplicate first packets gracefully, not by starting a new session
         // for each, which will not work well
         while i < self.uninit_fec_sessions.len() {
-            let s = &self.uninit_sessions[i];
+            let s = &self.uninit_fec_sessions[i];
             // TODO(thesis): clearly specify that protocol time should only
             // be used to prevent replay attacks. Regular timing facilities
             // should be used for session timeouts

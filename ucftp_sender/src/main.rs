@@ -34,6 +34,8 @@ fn main() {
         .format_timestamp(None)
         .format_target(false)
         .write_style(WriteStyle::Always)
+        .filter_level(log::LevelFilter::max())
+        .parse_default_env()
         .init();
     let cli = Cli::parse();
     info!("starting up");
@@ -298,11 +300,11 @@ fn get_keys(
 // Last 32 bytes are the keys: https://stackoverflow.com/a/58209771
 fn read_sender_keys(mut dir: PathBuf) -> (PrivateKey, PublicKey) {
     dir.push("sender_sk.pem");
-    info!("reading private key from {}", dir.display());
+    info!("reading private key from '{}'", dir.display());
     let sk = read_sk(&dir).unwrap();
     dir.pop();
     dir.push("sender_pk.pem");
-    info!("reading sender public key from {}", dir.display());
+    info!("reading sender public key from '{}'", dir.display());
     let pk = read_pk(&dir).unwrap();
 
     (sk, pk)

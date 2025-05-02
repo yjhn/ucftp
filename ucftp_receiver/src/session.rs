@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use hpke::Deserializable;
 use hpke::HpkeError;
+use hpke::Serializable;
 use hpke::aead::AeadCtxR;
 use hpke::aead::AeadTag;
 use hpke::aead::AesGcm128;
@@ -278,14 +279,6 @@ impl InProgressSession {
     ) -> Result<Self, PacketError> {
         trace!("InProgressSession being created");
         let now = Instant::now();
-        // Failure modes:
-        // - header incorrect
-        // - failed to decrypt encapsulated key
-        // - failed to decrypt data
-        // - data corrupt:
-        //   - unknown message type
-        //   - incorrect length
-        // misc corruption (e.g. length incorrect)
         // if packet.len() < MIN_FIRST_PACKET_LEN as usize {
         //     return Err(PacketError::Incomplete);
         // }
@@ -297,6 +290,11 @@ impl InProgressSession {
         let mut packet_used = 6;
 
         // Extensions. InProgressSession does not support any
+        // TODO(thesis): note that extensions can customize anything after them,
+        // that's why they are in front of first packet. Examples:
+        // - different field sizes (session ID, seq)
+        // - different crypto algorithms
+        // - FEC
         if packet[packet_used] > 0 {
             return Err(PacketError::UnknownExtensions);
         }
@@ -312,7 +310,7 @@ impl InProgressSession {
             try_decapsulate_key(pk.clone(), receiver_sk, &encapped_key).map(|c| (c, pk))
         }) {
             Some(crypto_ctx) => crypto_ctx,
-            None => return Err(PacketError::CryptoErr(HpkeError::DecapError)),
+            None => return Err(PacketError::SenderKeyNotFound),
         };
         packet_used += 32;
 
@@ -329,10 +327,10 @@ impl InProgressSession {
         // But since this is the first packet and the key has been
         // successfully decapped, this packet will be discarded if we fail
         // decryption anyway, so this doesn't matter
-        let buf_tag_start = packet.len() - 16;
-        let auth_tag = AeadTag::from_bytes(&packet[buf_tag_start..]).unwrap();
+        let auth_tag_start = packet.len() - 16;
+        let auth_tag = AeadTag::from_bytes(&packet[auth_tag_start..]).unwrap();
         let (aad, data_tag) = packet.split_at_mut(packet_used);
-        let ciphertext = &mut data_tag[..buf_tag_start - packet_used];
+        let ciphertext = &mut data_tag[..auth_tag_start - packet_used];
         // trace!(
         //     "decrypting: ct len {}, AAD len {}",
         //     ciphertext.len(),
@@ -350,7 +348,7 @@ impl InProgressSession {
         }
 
         // Allocate storage for the protocol message
-        let decrypted_data = Vec::from(&packet[packet_used..buf_tag_start]);
+        let decrypted_data = Vec::from(&packet[packet_used..auth_tag_start]);
 
         Ok(InProgressSession {
             sender_pk,
@@ -529,6 +527,8 @@ pub enum PacketError {
     UnknownPacketType,
     CryptoErr(HpkeError),
     UnknownExtensions,
+    /// None of the sender keys worked for decapsulating encapped key
+    SenderKeyNotFound,
     Incomplete,
     TooOld,
     DeserializationErr(DeserializationError),
@@ -574,19 +574,22 @@ impl InProgressFecSession {
         // TODO(thesis): move extensions header before encapped key
         let fec_decoder = match packet[packet_used] {
             0 => return Err(PacketError::ExpectedFecExtension),
-            1 => match SessionExtensions::from_buf(&packet[packet_used + 1..]) {
-                Ok(ext) => match ext {
-                    SessionExtensions::RaptorQ(object_transmission_information) => {
-                        packet_used += 13;
-                        raptorq::Decoder::new(object_transmission_information)
+            1 => {
+                // Extension count takes 1 byte
+                packet_used += 1;
+                match SessionExtensions::try_deserialize_from_buf(&packet[packet_used..]) {
+                    Ok((used, ext)) => {
+                        packet_used += used;
+                        match ext {
+                            SessionExtensions::RaptorQ(oti) => raptorq::Decoder::new(oti),
+                        }
                     }
-                },
-                Err(e) => return Err(PacketError::DeserializationErr(e)),
-            },
+                    Err(e) => return Err(PacketError::DeserializationErr(e)),
+                }
+            }
             _ => return Err(PacketError::UnknownExtensions),
         };
-        packet_used += 1;
-        // TODO: we may read out of bounds later if extensions are present
+        // TODO: we may read out of bounds later as extensions are present
 
         // Encapsulated key
         // Try decapsulation using every known sender key
@@ -598,7 +601,7 @@ impl InProgressFecSession {
             try_decapsulate_key(pk.clone(), receiver_sk, &encapped_key).map(|c| (c, pk))
         }) {
             Some(crypto_ctx) => crypto_ctx,
-            None => return Err(PacketError::CryptoErr(HpkeError::DecapError)),
+            None => return Err(PacketError::SenderKeyNotFound),
         };
         packet_used += 32;
 
@@ -611,18 +614,16 @@ impl InProgressFecSession {
         // But since this is the first packet and the key has been
         // successfully decapped, this packet will be discarded if we fail
         // decryption anyway, so this doesn't matter
-        let buf_tag_start = packet.len() - 16;
-        let auth_tag = AeadTag::from_bytes(&packet[buf_tag_start..]).unwrap();
-        let (aad, data_tag) = packet.split_at_mut(packet_used);
-        let ciphertext = &mut data_tag[..buf_tag_start - packet_used];
-        // trace!(
-        //     "decrypting: ct len {}, AAD len {}",
-        //     ciphertext.len(),
-        //     aad.len()
-        // );
-        match crypto_ctx.open_in_place_detached(ciphertext, aad, &auth_tag) {
-            Ok(_) => (),
-            Err(e) => return Err(PacketError::CryptoErr(e)),
+        let auth_tag_start = packet.len() - 16;
+        let auth_tag = AeadTag::from_bytes(&packet[auth_tag_start..]).unwrap();
+        let (aad, ciphertext) = packet[..auth_tag_start].split_at_mut(packet_used);
+        trace!(
+            "decrypting: ct len {}, AAD len {}",
+            ciphertext.len(),
+            aad.len()
+        );
+        if let Err(e) = crypto_ctx.open_in_place_detached(ciphertext, aad, &auth_tag) {
+            return Err(PacketError::CryptoErr(e));
         }
 
         let send_time = u32_from_le_bytes(&packet[packet_used..]);
@@ -632,7 +633,7 @@ impl InProgressFecSession {
         }
 
         // Allocate storage for the protocol message
-        let decrypted_data = Vec::from(&packet[packet_used..buf_tag_start]);
+        let decrypted_data = Vec::from(&packet[packet_used..auth_tag_start]);
 
         Ok(InProgressFecSession {
             sender_pk,
@@ -713,7 +714,6 @@ impl InProgressFecSession {
         // - all packet numbers first..=last have been received (last here means
         //   packet with last session packet type)
         // - command parsing does not fail
-        // TODO: FEC, decrypt all data in one go
         match self.fec_decoder.get_result() {
             Some(data) => {
                 let len = self.command_buf.len();
@@ -743,7 +743,7 @@ impl InProgressFecSession {
                             },
                         }
                     }
-                    Err(_) => {
+                    Err(e) => {
                         // TODO: what to do in this case? Just clear the buffer and
                         // wait for more packets? Declare failure and destroy session?
                         // Maybe just wait until timeout for new packets - TODO(thesis) - this will not work, as we already satisfied the decoder's
@@ -756,11 +756,17 @@ impl InProgressFecSession {
                         // One way to mitigate this is to use something like HMAC
                         // to integrity-protect FEC packets (encryption is not needed,
                         // as the underlying data is already encrypted)
+                        error!("session FEC data failed decryption: {}", e);
                         SessionStatus::Corrupt
                     }
                 }
             }
-            None => SessionStatus::Incomplete,
+            None => {
+                // TODO: when the full session is received, discard packets destined
+                // for the same session for some time (30s?) to prevent creating fake
+                // sessions.
+                SessionStatus::Incomplete
+            }
         }
     }
 }
