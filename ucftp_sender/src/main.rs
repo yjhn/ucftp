@@ -25,10 +25,29 @@ mod cli;
 mod message;
 mod packet;
 
-// RaptorQ FEC usage:
-// - collect all packets into an array
-// - special case: 1 packet - no FEC needed
-// - encode them with
+// TODO:
+// - encrypt packet numbers (for regular and FEC sessions):
+//   - https://datatracker.ietf.org/doc/html/rfc9147#name-record-number-encryption
+//   - derive key using hpke export functionality, choose info string (maybe "seq"
+//     for regular packets and "fec" for fec packets)
+// - encode data with raptorq and THEN encrypt individual packets:
+//   - will need to modify hpke to expose setting counter value
+//   - could do this by creating function "with_counter(counter: u64)", that uses
+//     the supplied counter and does not touch the internal one
+//   - to not reuse counter values, utilize the fact that counter is u64 and use some
+//     value of upper 32 bits, like 1, and then lower 32 bits are taken directly from
+//     raptorq packet header. This is not their intended numbering, but in this case
+//     this does not matter; on the other hand, we should be able to use a sliding
+//     receive window:
+//     https://datatracker.ietf.org/doc/html/rfc9147#name-anti-replay
+//     So it might be better to decode the header and use
+//     fec_block_num << 24 | (fec_packet_num ^ (0xff << 24))
+//     (highest byte is block num, lower 24 bits are packet num)
+//     TODO(thesis): if using this, note the inspiration from DTLS
+// - maybe switch to big endian ints, to match raptorq and other net protocols
+// - for regular sessions, what about using "epochs" to utilize shorter packet
+//   seq numbers, with higher bits inferred (this allows packet disambiguiation
+//   within 32 bit range, so enough for pretty much all reasonable net links)
 fn main() {
     env_logger::builder()
         .format_timestamp(None)
@@ -85,6 +104,8 @@ fn main() {
     // commands and do not execute unless a certain amount of time passed?
     // This also might be the way to deal with packets received for timed out sessions
 
+    let mut total_bytes_sent: usize;
+    let send_start: Instant;
     if !fec {
         let mut packet_iter = PacketIter::new(
             &mut rng,
@@ -95,8 +116,8 @@ fn main() {
         );
         info!("sending command with session {}", packet_iter.session_id());
 
-        let send_start = Instant::now();
-        let mut total_bytes_sent = 0;
+        send_start = Instant::now();
+        total_bytes_sent = 0;
         match max_speed {
             // Apply throttling
             Some(speed_kbps) => {
@@ -149,11 +170,6 @@ fn main() {
                 }
             }
         }
-        let total_duration = Instant::now().duration_since(send_start);
-        let secs = total_duration.as_secs_f32();
-        let speed = total_bytes_sent as f32 / (secs * 1000.0);
-        info!("average send speed: {speed:.2} kB/s");
-        info!("command sent, shutting down");
     } else {
         let (mut packet_iter, mut init_packet_buf) = FecPacketIter::new(
             &mut rng,
@@ -169,10 +185,10 @@ fn main() {
         );
         // TODO(thesis): First packet is special - it is not included in FEC, because it
         // specifies FEC settings
-        let send_start = Instant::now();
+        send_start = Instant::now();
         debug!("sending FEC session init packet");
         send_retry(&sock, &init_packet_buf);
-        let mut total_bytes_sent = init_packet_buf.len();
+        total_bytes_sent = init_packet_buf.len();
         init_packet_buf.clear();
         debug!("sending FEC packets");
         match max_speed {
@@ -246,12 +262,12 @@ fn main() {
                 }
             }
         }
-        let total_duration = Instant::now().duration_since(send_start);
-        let secs = total_duration.as_secs_f32();
-        let speed = total_bytes_sent as f32 / (secs * 1000.0);
-        info!("average send speed: {speed:.2} kB/s");
-        info!("command sent, shutting down");
     }
+    let total_duration = Instant::now().duration_since(send_start);
+    let secs = total_duration.as_secs_f32();
+    let speed = total_bytes_sent as f32 / (secs * 1000.0);
+    info!("average send speed: {speed:.2} kB/s");
+    info!("command sent, shutting down");
 }
 
 fn send_retry(socket: &UdpSocket, packet: &[u8]) {

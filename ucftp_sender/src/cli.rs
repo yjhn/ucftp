@@ -1,6 +1,6 @@
 use std::{error::Error, net::Ipv4Addr, path::PathBuf, str::FromStr};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use ucftp_shared::{IP4_HEADER_SIZE, UDP_HEADER_SIZE, message::*};
 
 const SAFE_IP4_PACKET_SIZE: u16 = 1280 - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
@@ -195,3 +195,13 @@ impl Command {
         }
     }
 }
+
+// TODO: RaptorQ blocks are independent (i.e. can be encoded/decoded independently
+// from each other). raptorq Rust lib only supports encoding/decoding all the
+// blocks in one go. There is a max of 256 blocks during one encoding. RaptorQ
+// by design cannot encode more than that, so the application has to do it by
+// itself. EDIT: no need to do that, RaptorQ already uses sub-blocks that are
+// kind of independent (at least they can be decoded independently). So manually
+// splitting everything into blocks is redundant. The existing mode of putting
+// all the data in one FEC "chunk" already works, just the API for decoding
+// blocks and sub-blocks is not provided by Rust raptorq.

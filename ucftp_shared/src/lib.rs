@@ -3,6 +3,9 @@ use std::io;
 use std::path::Path;
 use std::time;
 
+use aes::Aes128Enc;
+use aes::cipher::BlockCipherEncrypt;
+use aes::cipher::KeyInit;
 use base64::DecodeSliceError;
 use base64::engine::{Engine, general_purpose::STANDARD as BASE64_STANDARD};
 use hpke::Deserializable;
@@ -14,6 +17,9 @@ use hpke::aead::AeadCtxS;
 use hpke::aead::AesGcm128;
 use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
+use hybrid_array::Array;
+use hybrid_array::sizes::U16;
+use hybrid_array::sizes::U128;
 use rand_core::CryptoRng;
 use serialise::BufSerialize;
 use serialise::DeserializationError;
@@ -37,6 +43,8 @@ pub const MIN_FIRST_PACKET_HEADER_SIZE: u16 = 6 // protocol identifier
 pub const MIN_FIRST_PACKET_OVERHEAD: u16 = MIN_FIRST_PACKET_HEADER_SIZE
     + 4   // time
     + 16; // auth tag
+const SEQ_ENC_KEY_INFO: &[u8] = b"seq";
+const FEC_SEQ_ENC_KEY_INFO: &[u8] = b"fec";
 
 pub type ChosenKem = X25519HkdfSha256;
 pub type PrivateKey = <ChosenKem as hpke::Kem>::PrivateKey;
@@ -53,6 +61,75 @@ const _: () = if size_of::<EncappedKey>() != 32 {
 const _: () = if size_of::<hpke::aead::AeadTag<AesGcm128>>() != 16 {
     panic!()
 };
+
+pub struct Aes128EcbEnc {
+    encoder: Aes128Enc,
+}
+
+impl Aes128EcbEnc {
+    /// Create Aes128Enc from key slice
+    pub fn from_key(key: &[u8; 16]) -> Self {
+        Self {
+            encoder: Aes128Enc::new_from_slice(key).unwrap(),
+        }
+    }
+
+    /// Encrypt a single AES-128-ECB block (16 bytes) from
+    /// `buf_in` and put result in `buf_out`.
+    pub fn encrypt_block(&self, buf_in: &[u8; 16], buf_out: &mut [u8; 16]) {
+        let arr_in = <&Array<u8, U16> as From<&[u8; 16]>>::from(buf_in);
+        let arr_out = <&mut Array<u8, U16> as From<&mut [u8; 16]>>::from(buf_out);
+        self.encoder.encrypt_block_b2b(arr_in, arr_out);
+    }
+
+    /// Encrypt/decrypt sequence number. Encryption and decryption are identical
+    /// operations. Same strategy as used in DTLS 1.3, 4.2.3:
+    /// 1. encrypt one block of `ct`
+    /// 2. `seq` = `seq` XOR AES-128-ECB(`ct`)
+    /// Args:
+    /// - `ct` - ciphertext
+    /// - `seq` - bytes to be XORed.
+    pub fn encrypt_decrypt_seq(&self, seq: &mut [u8], ct: &[u8]) {
+        let first_block = ct.first_chunk::<16>().unwrap();
+        let mut enc_block = [0; 16];
+        self.encrypt_block(first_block, &mut enc_block);
+        seq.iter_mut().zip(first_block).for_each(|(s, b)| *s ^= b);
+    }
+}
+
+pub trait PacketSeqKey {
+    fn regular_packet_seq_key(&self) -> [u8; 16];
+
+    fn fec_packet_seq_key(&self) -> [u8; 16];
+}
+
+impl PacketSeqKey for AeadCtxS<ChosenAead, ChosenKdf, ChosenKem> {
+    fn regular_packet_seq_key(&self) -> [u8; 16] {
+        let mut buf = [0; 16];
+        self.export(SEQ_ENC_KEY_INFO, &mut buf).unwrap();
+        buf
+    }
+
+    fn fec_packet_seq_key(&self) -> [u8; 16] {
+        let mut buf = [0; 16];
+        self.export(FEC_SEQ_ENC_KEY_INFO, &mut buf).unwrap();
+        buf
+    }
+}
+
+impl PacketSeqKey for AeadCtxR<ChosenAead, ChosenKdf, ChosenKem> {
+    fn regular_packet_seq_key(&self) -> [u8; 16] {
+        let mut buf = [0; 16];
+        self.export(SEQ_ENC_KEY_INFO, &mut buf).unwrap();
+        buf
+    }
+
+    fn fec_packet_seq_key(&self) -> [u8; 16] {
+        let mut buf = [0; 16];
+        self.export(FEC_SEQ_ENC_KEY_INFO, &mut buf).unwrap();
+        buf
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum SessionExtensions {

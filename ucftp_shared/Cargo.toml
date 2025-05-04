@@ -14,3 +14,5 @@ log.workspace = true
 raptorq.workspace = true
 base64 = { version = "0.22.1", default-features = false }
 rand_core = "0.9.3"
+aes = "0.9.0-pre.3"
+hybrid-array = "0.3"

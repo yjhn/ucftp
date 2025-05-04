@@ -3,7 +3,6 @@ use std::time::Instant;
 
 use hpke::Deserializable;
 use hpke::HpkeError;
-use hpke::Serializable;
 use hpke::aead::AeadCtxR;
 use hpke::aead::AeadTag;
 use hpke::aead::AesGcm128;
@@ -54,14 +53,13 @@ fn packet_send_timeout(t: u32) -> bool {
 pub struct EncryptedPacket {
     packet_type: PacketType,
     session_id: u64,
-    sequence_number: u64,
     encrypted_data: Box<[u8]>,
     auth_tag: AeadTag<AesGcm128>,
 }
 
 impl EncryptedPacket {
     #[must_use]
-    pub fn try_from_buf(packet: &[u8], p_type: PacketType) -> Result<Self, PacketError> {
+    pub fn try_from_buf(packet: &mut [u8], p_type: PacketType) -> Result<Self, PacketError> {
         debug_assert_ne!(p_type, PacketType::FirstData);
         if packet.len() < MIN_PACKET_LEN as usize {
             return Err(PacketError::Incomplete);
@@ -72,9 +70,8 @@ impl EncryptedPacket {
         let session_id = u64_from_le_bytes(&packet[packet_used..]);
         packet_used += 8;
 
-        // Sequence number
-        let sequence_number = seq_deser(&packet[packet_used..]);
-        packet_used += 6;
+        // Sequence number cannot be decrypted
+        // It takes up first 6 bytes of encypted_data
 
         let buf_tag_start = packet.len() - 16;
         // let (_aad, data_tag) = packet.split_at(packet_used);
@@ -84,7 +81,6 @@ impl EncryptedPacket {
         let encrypted_data = Box::from(&packet[packet_used..buf_tag_start]);
 
         Ok(EncryptedPacket {
-            sequence_number,
             auth_tag,
             packet_type: p_type,
             encrypted_data,
@@ -92,12 +88,44 @@ impl EncryptedPacket {
         })
     }
 
+    pub fn decrypt_seq(mut self, aes_ecb: &Aes128EcbEnc) -> EncryptedPacketWithSeq {
+        // Packet sequence number is a u48 stored in u64
+        let (seq, other) = self.encrypted_data.split_at_mut(6);
+        aes_ecb.encrypt_decrypt_seq(seq, other);
+        let sequence_number = seq_deser(seq);
+
+        EncryptedPacketWithSeq {
+            packet_type: self.packet_type,
+            session_id: self.session_id,
+            sequence_number,
+            encrypted_data: self.encrypted_data,
+            auth_tag: self.auth_tag,
+        }
+    }
+
+    pub fn session_id(&self) -> u64 {
+        self.session_id
+    }
+}
+
+pub struct EncryptedPacketWithSeq {
+    packet_type: PacketType,
+    session_id: u64,
+    sequence_number: u64,
+    // Decrypted sequence number takes first 6 bytes
+    encrypted_data: Box<[u8]>,
+    auth_tag: AeadTag<AesGcm128>,
+}
+
+impl EncryptedPacketWithSeq {
     // This will corrupt the packet's buffer, so the packet will become useless
     // either way
+    // TODO: create a new type EncryptedPacketWithSeq
     #[must_use]
-    fn try_decrypt(
+    pub fn try_decrypt(
         mut self,
         crypto_ctx: &mut CryptoCtx,
+        aes_ecb: &Aes128EcbEnc,
         buf: &mut Vec<u8>,
     ) -> Result<(), PacketError> {
         // Recreate AAD, structure:
@@ -105,13 +133,14 @@ impl EncryptedPacket {
         // - session ID
         // - sequence number
         // use buf as scratch space
+
         buf.push(self.packet_type as u8);
         dump_le(buf, self.session_id);
-        // Packet sequence number is a u48 stored in u64
-        buf.extend_from_slice(&self.sequence_number.to_le_bytes()[..6]);
+        // Sequence number
+        buf.extend_from_slice(&self.encrypted_data[..6]);
 
         match crypto_ctx.open_in_place_detached(
-            &mut self.encrypted_data,
+            &mut self.encrypted_data[6..],
             &buf[buf.len() - 15..],
             &self.auth_tag,
         ) {
@@ -125,7 +154,7 @@ impl EncryptedPacket {
                 // buf.extend_from_slice(&self.encrypted_data[4..]);
                 // Ok(time)
                 // }
-                buf.extend_from_slice(&self.encrypted_data);
+                buf.extend_from_slice(&self.encrypted_data[6..]);
                 Ok(())
             }
             Err(e) => {
@@ -134,10 +163,6 @@ impl EncryptedPacket {
                 Err(PacketError::CryptoErr(e))
             }
         }
-    }
-
-    pub fn session_id(&self) -> u64 {
-        self.session_id
     }
 }
 
@@ -188,10 +213,7 @@ impl UninitSession {
     pub fn add_packet(&mut self, packet: EncryptedPacket) {
         debug_assert_eq!(self.session_id(), packet.session_id);
         debug_assert!((Instant::now() - self.progress_time()).as_secs() < PROGRESS_TIMEOUT + 5);
-        trace!(
-            "added packet {} to uninit session {}",
-            packet.sequence_number, self.session_id
-        );
+        trace!("added packet to uninit session {}", self.session_id);
         self.packet_buf.push(packet);
     }
 }
@@ -263,9 +285,10 @@ pub struct InProgressSession {
     command_buf: Vec<u8>,
     // packet sequence ID needed to make progress on decryption
     seq_to_make_progress: u64,
-    out_of_order_packet_buffer: Vec<EncryptedPacket>,
+    out_of_order_packet_buffer: Vec<EncryptedPacketWithSeq>,
     last_packet_time: Instant,
     crypto_ctx: CryptoCtx,
+    aes_ecb: Aes128EcbEnc,
 }
 
 impl InProgressSession {
@@ -319,7 +342,10 @@ impl InProgressSession {
         packet_used += 8;
 
         // Sequence number
-        let sequence_number = seq_deser(&packet[packet_used..]);
+        let aes_ecb = Aes128EcbEnc::from_key(&crypto_ctx.regular_packet_seq_key());
+        let (seq, other) = packet[packet_used..].split_at_mut(6);
+        aes_ecb.encrypt_decrypt_seq(seq, other);
+        let sequence_number = seq_deser(seq);
         packet_used += 6;
 
         // Decrypt data
@@ -350,6 +376,8 @@ impl InProgressSession {
         // Allocate storage for the protocol message
         let decrypted_data = Vec::from(&packet[packet_used..auth_tag_start]);
 
+        let aes_ecb = Aes128EcbEnc::from_key(&crypto_ctx.regular_packet_seq_key());
+
         Ok(InProgressSession {
             sender_pk,
             session_id,
@@ -359,6 +387,7 @@ impl InProgressSession {
             seq_to_make_progress: sequence_number + 1,
             out_of_order_packet_buffer: Vec::new(),
             last_packet_time: now,
+            aes_ecb,
         })
     }
 
@@ -384,16 +413,21 @@ impl InProgressSession {
         debug_assert!(self.out_of_order_packet_buffer.is_empty());
         debug_assert!(self.last_packet_time >= uninit_session.init_time);
         // Sort packets by sequence number
-        uninit_session
+        let mut packets_with_seqs: Vec<EncryptedPacketWithSeq> = uninit_session
             .packet_buf
-            .sort_unstable_by(|a, b| a.sequence_number.cmp(&b.sequence_number));
+            .drain(..)
+            .map(|p| p.decrypt_seq(&self.aes_ecb))
+            .collect();
+        packets_with_seqs.sort_unstable_by(|a, b| a.sequence_number.cmp(&b.sequence_number));
         // Try decrypting pending packets if possible
-        while uninit_session.packet_buf[0].sequence_number == self.seq_to_make_progress {
+        while !packets_with_seqs.is_empty()
+            && packets_with_seqs[0].sequence_number == self.seq_to_make_progress
+        {
             // TODO: use VecDequeue or smth similar for faster front pops
-            self.decrypt_packet(uninit_session.packet_buf.remove(0), now);
+            self.decrypt_packet(packets_with_seqs.remove(0), now);
         }
 
-        self.out_of_order_packet_buffer = uninit_session.packet_buf;
+        self.out_of_order_packet_buffer = packets_with_seqs;
         self.session_status()
     }
 
@@ -417,9 +451,9 @@ impl InProgressSession {
         self.last_packet_time
     }
 
-    fn decrypt_packet(&mut self, packet: EncryptedPacket, now: Instant) {
+    fn decrypt_packet(&mut self, packet: EncryptedPacketWithSeq, now: Instant) {
         let seq = packet.sequence_number;
-        match packet.try_decrypt(&mut self.crypto_ctx, &mut self.command_buf) {
+        match packet.try_decrypt(&mut self.crypto_ctx, &self.aes_ecb, &mut self.command_buf) {
             Ok(_) => {
                 trace!(
                     "added decrypted packet {} to in-progress session {}",
@@ -435,7 +469,8 @@ impl InProgressSession {
     #[must_use]
     pub fn add_packet(&mut self, packet: EncryptedPacket, now: Instant) -> SessionStatus {
         debug_assert_eq!(self.session_id(), packet.session_id);
-        debug_assert!((Instant::now() - self.progress_time()).as_secs() < 45);
+        debug_assert!((now - self.progress_time()).as_secs() < 45);
+        let packet = packet.decrypt_seq(&self.aes_ecb);
         // Try decrypt
         match self.seq_to_make_progress.cmp(&packet.sequence_number) {
             Ordering::Less => {
@@ -448,6 +483,19 @@ impl InProgressSession {
             }
             Ordering::Equal => {
                 self.decrypt_packet(packet, now);
+                // Try decrypting more packets
+                // TODO: be more efficient
+                self.out_of_order_packet_buffer
+                    .sort_unstable_by(|a, b| a.sequence_number.cmp(&b.sequence_number));
+                while !self.out_of_order_packet_buffer.is_empty()
+                    && self.out_of_order_packet_buffer[0].sequence_number
+                        == self.seq_to_make_progress
+                {
+                    // TODO: use VecDequeue or smth similar for faster front pops
+                    let elem = self.out_of_order_packet_buffer.remove(0);
+                    self.decrypt_packet(elem, now);
+                }
+
                 self.session_status()
             }
             Ordering::Greater => {

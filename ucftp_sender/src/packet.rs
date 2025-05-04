@@ -4,8 +4,8 @@ use hpke::{Serializable, aead::AeadCtxS};
 use log::{debug, trace};
 use rand::{CryptoRng, Rng};
 use ucftp_shared::{
-    ChosenAead, ChosenKdf, ChosenKem, EncappedKey, MIN_FIRST_PACKET_OVERHEAD, PROTOCOL_IDENTIFIER,
-    PacketType, SessionExtensions, protocol_time,
+    Aes128EcbEnc, ChosenAead, ChosenKdf, ChosenKem, EncappedKey, MIN_FIRST_PACKET_OVERHEAD,
+    PROTOCOL_IDENTIFIER, PacketSeqKey, PacketType, SessionExtensions, protocol_time,
     serialise::{BufSerialize, dump_le},
 };
 
@@ -24,6 +24,7 @@ pub struct PacketIter {
     packet_size: u16,
     regular_packet_data_size: u16,
     packet_buffer: Vec<u8>,
+    aes_ecb: Aes128EcbEnc,
 }
 
 impl PacketIter {
@@ -36,6 +37,8 @@ impl PacketIter {
     ) -> Self {
         let session_id = rng.random();
         let packet_buffer = Vec::with_capacity(packet_size as usize);
+        let key = crypto_ctx.regular_packet_seq_key();
+        let aes_ecb = Aes128EcbEnc::from_key(&key);
         Self {
             session_id,
             packet_sequence_number: 0,
@@ -50,6 +53,7 @@ impl PacketIter {
                 - 6  // sequence number
                 - 8, // session ID
             packet_buffer,
+            aes_ecb,
         }
     }
 
@@ -99,6 +103,10 @@ impl PacketIter {
             self.packet_buffer.push(0);
         }
         auth_tag.write_exact(&mut self.packet_buffer[data_end..]);
+
+        // Encrypt sequence number
+        let (seq, ct) = self.packet_buffer[aad_end - 6..].split_at_mut(6);
+        self.aes_ecb.encrypt_decrypt_seq(seq, ct);
     }
 
     pub fn next_packet(&mut self) -> Option<&[u8]> {
@@ -148,10 +156,12 @@ pub struct FecPacketIter {
     session_id: u64,
     packets: Vec<raptorq::EncodingPacket>,
     packets_sent: usize,
+    crypto_ctx: AeadCtxS<ChosenAead, ChosenKdf, ChosenKem>,
+    aes_ecb: Aes128EcbEnc,
 }
 
 impl FecPacketIter {
-    /// If there is only one packet in session, returns that packet
+    /// Returns (FecPacketIter, first_packet)
     pub fn new(
         rng: &mut impl CryptoRng,
         mut protocol_message: Vec<u8>,
@@ -265,11 +275,15 @@ impl FecPacketIter {
             fec_encoder.get_encoded_packets(source_packets * fec_overhead_percent as u32 / 100)
         };
 
+        let key = crypto_ctx.fec_packet_seq_key();
+        let aes_ecb = Aes128EcbEnc::from_key(&key);
         (
             Self {
                 session_id,
                 packets,
                 packets_sent: 0,
+                crypto_ctx,
+                aes_ecb,
             },
             first_packet,
         )

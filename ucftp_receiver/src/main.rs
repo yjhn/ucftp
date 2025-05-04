@@ -28,6 +28,15 @@ use socket2::{Domain, Socket, Type};
 use ucftp_shared::serialise::u64_from_le_bytes;
 use ucftp_shared::*;
 
+// TODO(thesis):
+// implementation-guided protocol improvements:
+// - length prepended to message
+// - removal of packet len field
+// - rekeying? (currently not implemented) - forward secrecy is nice, but not really
+//   beneficial in the case of ucftp. The sessions are too short
+// - test by sending large file to /dev/null (this will also reveal packet loss
+//   problems) - also add such a test to thesis, including throttling discussion
+
 // Equipment that allows frames larger than 9216 bytes is very rare
 const MAX_PACKET_SIZE: u16 = 9216 - 18 - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
 const SUPPORTED_PACKET_SIZE: u16 = 1500;
@@ -185,7 +194,7 @@ impl Receiver {
             }
             PacketType::RegularData | PacketType::LastData => {
                 // TODO: should processing be different between regular and last?
-                let packet = match EncryptedPacket::try_from_buf(&packet[1..], packet_type) {
+                let packet = match EncryptedPacket::try_from_buf(&mut packet[1..], packet_type) {
                     Ok(p) => p,
                     Err(e) => {
                         warn!("failed to parse regular packet: {:?}", e);
