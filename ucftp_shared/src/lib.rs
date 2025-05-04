@@ -97,6 +97,11 @@ impl Aes128EcbEnc {
     }
 }
 
+pub fn raptorq_crypto_seq(seq: &raptorq::PayloadId) -> u64 {
+    const COUNTER_PREFIX: u64 = 1 << 32;
+    COUNTER_PREFIX | (u32::from_le_bytes(seq.serialize()) as u64)
+}
+
 pub trait PacketSeqKey {
     fn regular_packet_seq_key(&self) -> [u8; 16];
 

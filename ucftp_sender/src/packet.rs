@@ -6,12 +6,14 @@ use rand::{CryptoRng, Rng};
 use ucftp_shared::{
     Aes128EcbEnc, ChosenAead, ChosenKdf, ChosenKem, EncappedKey, MIN_FIRST_PACKET_OVERHEAD,
     PROTOCOL_IDENTIFIER, PacketSeqKey, PacketType, SessionExtensions, protocol_time,
+    raptorq_crypto_seq,
     serialise::{BufSerialize, dump_le},
 };
 
 const FEC_PACKET_OVERHEAD: u16 = 1 // packet type
-    + 8  // session ID
-    + 4; // FEC packet header
+    + 8   // session ID
+    + 4   // FEC packet header
+    + 16; // auth tag
 
 pub struct PacketIter {
     session_id: u64,
@@ -185,7 +187,7 @@ impl FecPacketIter {
         first_packet.push(1);
         // Extensions
         let oti = raptorq::ObjectTransmissionInformation::with_defaults(
-            (protocol_message.len() - first_packet_data_size + 16) as u64,
+            (protocol_message.len() - first_packet_data_size) as u64,
             packet_size - FEC_PACKET_OVERHEAD,
         );
         let ext = SessionExtensions::RaptorQ(oti);
@@ -246,27 +248,28 @@ impl FecPacketIter {
 
         // Encrypt the remaining data
         // TODO(thesis): we encrypt the whole remaining data in one go, AAD is session ID
-        let fec_encoder = {
-            // This encryption MUST happen after first packet encryption. Encryption
-            // order matters.
-            let auth_tag = crypto_ctx
-                .seal_in_place_detached(
-                    &mut protocol_message[first_packet_data_size as usize..],
-                    &session_id.to_le_bytes(),
-                )
-                .unwrap();
-            debug!(
-                "encrypted the remaining message: {} bytes",
-                protocol_message.len() - first_packet_data_size as usize,
-            );
-            // Auth tag
-            let data_end = protocol_message.len();
-            for _ in 0..16u8 {
-                protocol_message.push(0);
-            }
-            auth_tag.write_exact(&mut protocol_message[data_end..]);
-            raptorq::Encoder::new(&protocol_message[first_packet_data_size..], oti)
-        };
+        // let fec_encoder = {
+        //     // This encryption MUST happen after first packet encryption. Encryption
+        //     // order matters.
+        //     let auth_tag = crypto_ctx
+        //         .seal_in_place_detached(
+        //             &mut protocol_message[first_packet_data_size as usize..],
+        //             &session_id.to_le_bytes(),
+        //         )
+        //         .unwrap();
+        //     debug!(
+        //         "encrypted the remaining message: {} bytes",
+        //         protocol_message.len() - first_packet_data_size as usize,
+        //     );
+        //     // Auth tag
+        //     let data_end = protocol_message.len();
+        //     for _ in 0..16u8 {
+        //         protocol_message.push(0);
+        //     }
+        //     auth_tag.write_exact(&mut protocol_message[data_end..]);
+        //     raptorq::Encoder::new(&protocol_message[first_packet_data_size..], oti)
+        // };
+        let fec_encoder = raptorq::Encoder::new(&protocol_message[first_packet_data_size..], oti);
         let packets = {
             let source_packets = (protocol_message.len() - first_packet_data_size as usize)
                 .div_ceil(packet_size as usize) as u32;
@@ -294,19 +297,47 @@ impl FecPacketIter {
     }
 
     /// True = success, false = fail. Same as Some() and None for next_packet()
-    /// buf does not have to be empty
+    /// buf does not have to be empty, but it will be cleared
     pub fn next_packet_buf(&mut self, buf: &mut Vec<u8>) -> bool {
         if self.packets_sent == self.packets.len() {
             return false;
         }
 
+        buf.clear();
         let packet = &self.packets[self.packets_sent];
         // Serialize manually. Taken from:
         // https://github.com/cberner/raptorq/blob/v2.0.0/src/base.rs#L85
         buf.push(PacketType::ErrorCorrection as u8);
         buf.extend_from_slice(&self.session_id.to_le_bytes());
         buf.extend_from_slice(&packet.payload_id().serialize());
+        let aad_end = buf.len();
         buf.extend_from_slice(packet.data());
+
+        // Encrypt
+        let (aad, data) = buf.split_at_mut(aad_end);
+        let seq = raptorq_crypto_seq(&packet.payload_id());
+
+        let auth_tag = self
+            .crypto_ctx
+            .seal_in_place_detached_seq(data, aad, seq)
+            .unwrap();
+        trace!(
+            "encrypted {} bytes, AAD len {} bytes",
+            data.len(),
+            aad.len()
+        );
+
+        // Auth tag
+        let data_end = buf.len();
+        for _ in 0..16u8 {
+            buf.push(0);
+        }
+        auth_tag.write_exact(&mut buf[data_end..]);
+
+        // Encrypt seq
+        let (seq, other) = buf[9..].split_at_mut(4);
+        self.aes_ecb.encrypt_decrypt_seq(seq, other);
+
         self.packets_sent += 1;
 
         true

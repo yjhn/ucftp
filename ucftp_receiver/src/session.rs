@@ -125,7 +125,6 @@ impl EncryptedPacketWithSeq {
     pub fn try_decrypt(
         mut self,
         crypto_ctx: &mut CryptoCtx,
-        aes_ecb: &Aes128EcbEnc,
         buf: &mut Vec<u8>,
     ) -> Result<(), PacketError> {
         // Recreate AAD, structure:
@@ -218,13 +217,91 @@ impl UninitSession {
     }
 }
 
+/// Packet type is alway FEC
+pub struct EncryptedRaptorqPacket {
+    session_id: u64,
+    encrypted_data: Box<[u8]>,
+    auth_tag: AeadTag<AesGcm128>,
+}
+
+impl EncryptedRaptorqPacket {
+    // TODO: maybe use Vec for packet?
+    #[must_use]
+    pub fn try_from_buf(packet: &mut [u8], session_id: u64) -> Result<Self, PacketError> {
+        // TODO: update/customize MIN_PACKET_LEN for various cases. Maybe use
+        // associated consts for each packet type?
+        if packet.len() < MIN_PACKET_LEN as usize {
+            return Err(PacketError::Incomplete);
+        }
+
+        // Sequence number cannot be decrypted
+        // It takes up first 4 bytes of encypted_data
+
+        let buf_tag_start = packet.len() - 16;
+        let auth_tag = AeadTag::from_bytes(&packet[buf_tag_start..]).unwrap();
+
+        // Allocate storage for the protocol message
+        let encrypted_data = Box::from(&packet[..buf_tag_start]);
+
+        Ok(EncryptedRaptorqPacket {
+            auth_tag,
+            encrypted_data,
+            session_id,
+        })
+    }
+
+    pub fn try_decrypt(
+        mut self,
+        aes_ecb: &Aes128EcbEnc,
+        crypto_ctx: &mut CryptoCtx,
+    ) -> Result<raptorq::EncodingPacket, PacketError> {
+        // Packet sequence number is RaptorQ PayloadId (4 bytes)
+        let (seq, other) = self.encrypted_data.split_at_mut(4);
+        aes_ecb.encrypt_decrypt_seq(seq, other);
+        let seq = seq.first_chunk::<4>().unwrap();
+        let payload_id = raptorq::PayloadId::deserialize(seq);
+
+        // Data
+        // Recreate AAD, structure:
+        // - packet type
+        // - session ID
+        // - sequence number (PayloadId)
+        // use buf as scratch space
+        let mut aad = [0; 13];
+        aad[0] = PacketType::ErrorCorrection as u8;
+        aad[1..9].copy_from_slice(&self.session_id.to_le_bytes());
+        aad[9..].copy_from_slice(seq);
+
+        let decryption_seq = raptorq_crypto_seq(&payload_id);
+        match crypto_ctx.open_in_place_detached_seq(
+            &mut self.encrypted_data[4..],
+            &aad,
+            &self.auth_tag,
+            decryption_seq,
+        ) {
+            // TODO: maybe use EncodingPacket::deserialize?
+            // TODO: store encryped_data and encrpyted seq separately to avoid
+            // copying here
+            Ok(_) => Ok(raptorq::EncodingPacket::new(
+                payload_id,
+                self.encrypted_data[4..].into(),
+            )),
+            Err(e) => Err(PacketError::CryptoErr(e)),
+        }
+    }
+
+    pub fn session_id(&self) -> u64 {
+        self.session_id
+    }
+}
+
 pub struct UninitFecSession {
     session_id: u64,
     // No packets can be decrypted without the first packet
     // TODO(thesis): mention this limitation and that it cannot be
     // removed without relying on possibly attacker-controlled and unverified
     // data (because we cannot verify contents without the keys)
-    fec_packet_buf: Vec<raptorq::EncodingPacket>,
+    fec_packet_buf: Vec<EncryptedRaptorqPacket>,
     // Packet send time is encrypted. Even if it was not encrypted, we
     // could not trust it, because we can't verify its correctness until
     // we get the first packet. So the timeout logic in this case works
@@ -234,7 +311,7 @@ pub struct UninitFecSession {
 }
 
 impl UninitFecSession {
-    pub fn from_packet(packet: raptorq::EncodingPacket, session_id: u64) -> Self {
+    pub fn from_packet(packet: EncryptedRaptorqPacket, session_id: u64) -> Self {
         UninitFecSession {
             session_id,
             fec_packet_buf: vec![packet],
@@ -262,7 +339,7 @@ impl UninitFecSession {
         self.init_time
     }
 
-    pub fn add_packet(&mut self, packet: raptorq::EncodingPacket, session_id: u64) {
+    pub fn add_packet(&mut self, packet: EncryptedRaptorqPacket, session_id: u64) {
         debug_assert_eq!(self.session_id(), session_id);
         debug_assert!((Instant::now() - self.progress_time()).as_secs() < PROGRESS_TIMEOUT + 5);
 
@@ -453,7 +530,7 @@ impl InProgressSession {
 
     fn decrypt_packet(&mut self, packet: EncryptedPacketWithSeq, now: Instant) {
         let seq = packet.sequence_number;
-        match packet.try_decrypt(&mut self.crypto_ctx, &self.aes_ecb, &mut self.command_buf) {
+        match packet.try_decrypt(&mut self.crypto_ctx, &mut self.command_buf) {
             Ok(_) => {
                 trace!(
                     "added decrypted packet {} to in-progress session {}",
@@ -593,6 +670,7 @@ pub struct InProgressFecSession {
     command_buf: Vec<u8>,
     first_packet_time: Instant,
     crypto_ctx: CryptoCtx,
+    aes_ecb: Aes128EcbEnc,
     fec_decoder: raptorq::Decoder,
 }
 
@@ -683,6 +761,9 @@ impl InProgressFecSession {
         // Allocate storage for the protocol message
         let decrypted_data = Vec::from(&packet[packet_used..auth_tag_start]);
 
+        let key = crypto_ctx.fec_packet_seq_key();
+        let aes_ecb = Aes128EcbEnc::from_key(&key);
+
         Ok(InProgressFecSession {
             sender_pk,
             session_id,
@@ -690,6 +771,7 @@ impl InProgressFecSession {
             command_buf: decrypted_data,
             first_packet_time: now,
             fec_decoder,
+            aes_ecb,
         })
     }
 
@@ -703,7 +785,17 @@ impl InProgressFecSession {
         debug_assert!((now - self.progress_time()).as_secs() < PROGRESS_TIMEOUT + 5);
 
         for p in uninit_session.fec_packet_buf.drain(..) {
-            self.fec_decoder.add_new_packet(p);
+            match p.try_decrypt(&self.aes_ecb, &mut self.crypto_ctx) {
+                Ok(p2) => {
+                    self.fec_decoder.add_new_packet(p2);
+                }
+                Err(e) => {
+                    error!(
+                        "failed to decrypt FEC packet for session {}: {:?}",
+                        self.session_id, e
+                    );
+                }
+            }
         }
         self.session_status()
     }
@@ -741,7 +833,7 @@ impl InProgressFecSession {
     #[must_use]
     pub fn add_packet(
         &mut self,
-        packet: raptorq::EncodingPacket,
+        packet: EncryptedRaptorqPacket,
         session_id: u64,
         now: Instant,
     ) -> SessionStatus {
@@ -751,8 +843,19 @@ impl InProgressFecSession {
             "adding FEC packet to in-progress FEC session {}",
             self.session_id
         );
-        self.fec_decoder.add_new_packet(packet);
-        self.session_status()
+        match packet.try_decrypt(&self.aes_ecb, &mut self.crypto_ctx) {
+            Ok(p) => {
+                self.fec_decoder.add_new_packet(p);
+                self.session_status()
+            }
+            Err(e) => {
+                error!(
+                    "failed to decrypt FEC packet for session {}: {:?}",
+                    session_id, e
+                );
+                SessionStatus::Incomplete
+            }
+        }
     }
 
     /// Check if this session is complete
@@ -764,49 +867,23 @@ impl InProgressFecSession {
         // - command parsing does not fail
         match self.fec_decoder.get_result() {
             Some(data) => {
-                let len = self.command_buf.len();
-                self.command_buf.extend_from_slice(&data[..data.len() - 16]);
-                let auth_tag = AeadTag::from_bytes(&data[data.len() - 16..]).unwrap();
-                match self.crypto_ctx.open_in_place_detached(
-                    &mut self.command_buf[len..],
-                    &self.session_id.to_le_bytes(),
-                    &auth_tag,
-                ) {
-                    Ok(_) => {
-                        match CommandExecutor::new(&self.command_buf, self.session_id) {
-                            Ok(command) => {
-                                debug!("received full command for session {}", self.session_id());
-                                SessionStatus::Complete(command)
-                            }
-                            Err(e) => match e {
-                                DeserializationError::CommandLenExpected
-                                | DeserializationError::LengthMismatch => {
-                                    // trace!("failed attempt to deserialize session: {:?}", e);
-                                    SessionStatus::Incomplete
-                                }
-                                err => {
-                                    error!("error parsing command: {:?}", err);
-                                    SessionStatus::Corrupt
-                                }
-                            },
+                self.command_buf.extend_from_slice(&data);
+                match CommandExecutor::new(&self.command_buf, self.session_id) {
+                    Ok(command) => {
+                        debug!("received full command for session {}", self.session_id());
+                        SessionStatus::Complete(command)
+                    }
+                    Err(e) => match e {
+                        DeserializationError::CommandLenExpected
+                        | DeserializationError::LengthMismatch => {
+                            // trace!("failed attempt to deserialize session: {:?}", e);
+                            SessionStatus::Incomplete
                         }
-                    }
-                    Err(e) => {
-                        // TODO: what to do in this case? Just clear the buffer and
-                        // wait for more packets? Declare failure and destroy session?
-                        // Maybe just wait until timeout for new packets - TODO(thesis) - this will not work, as we already satisfied the decoder's
-                        // requirements, so nothing to be gained there. So this should
-                        // probably just be reported as an error and that's it
-                        // TODO(thesis): this is one weakness of current
-                        // usage of FEC. Even one well-crafted corrupt packet can
-                        // make the whole stream decode incorrectly, thus giving
-                        // attackers quite good DOS opportunities
-                        // One way to mitigate this is to use something like HMAC
-                        // to integrity-protect FEC packets (encryption is not needed,
-                        // as the underlying data is already encrypted)
-                        error!("session FEC data failed decryption: {}", e);
-                        SessionStatus::Corrupt
-                    }
+                        err => {
+                            error!("error parsing command: {:?}", err);
+                            SessionStatus::Corrupt
+                        }
+                    },
                 }
             }
             None => {

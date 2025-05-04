@@ -18,6 +18,7 @@ use executor::GlobalExecutor;
 use log::{debug, error, info, trace, warn};
 use message::CommandExecutor;
 use session::EncryptedPacket;
+use session::EncryptedRaptorqPacket;
 use session::InProgressFecSession;
 use session::InProgressSession;
 use session::MIN_FIRST_PACKET_LEN;
@@ -250,7 +251,17 @@ impl Receiver {
                     "error correction packet for session {} received",
                     session_id
                 );
-                let packet = raptorq::EncodingPacket::deserialize(&packet[9..]);
+                let packet =
+                    match EncryptedRaptorqPacket::try_from_buf(&mut packet[9..], session_id) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            error!(
+                                "failed to deserialize packet for session {}: {:?}",
+                                session_id, e
+                            );
+                            return None;
+                        }
+                    };
                 let now = Instant::now();
                 let mut i = 0;
                 while i < self.uninit_fec_sessions.len() {
