@@ -23,7 +23,7 @@ panic = "abort"
 
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive"] }
-hpke = { version = "0.13", default-features = false, features = ["x25519"] }
+hpke = { path = "hpke_custom", version = "0.13", default-features = false, features = ["x25519"] }
 rand = "0.9.1"
 log = { version = "0.4.27", features = ["release_max_level_info"] }
 env_logger = { version = "0.11.8", default-features = false, features = ["color", "humantime"] }
