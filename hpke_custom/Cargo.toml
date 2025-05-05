@@ -49,26 +49,6 @@ name = "hpke"
 path = "src/lib.rs"
 bench = false
 
-[[example]]
-name = "agility"
-path = "examples/agility.rs"
-required-features = [
-    "p256",
-    "p384",
-    "p521",
-    "x25519",
-]
-
-[[example]]
-name = "client_server"
-path = "examples/client_server.rs"
-required-features = ["x25519"]
-
-[[bench]]
-name = "benches"
-path = "benches/benches.rs"
-harness = false
-
 [dependencies.aead]
 version = "0.5"
 
