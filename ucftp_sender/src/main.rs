@@ -25,7 +25,7 @@ mod cli;
 mod message;
 mod packet;
 
-// TODO:
+// TODO(thesis):
 // - encrypt packet numbers (for regular and FEC sessions):
 //   - https://datatracker.ietf.org/doc/html/rfc9147#name-record-number-encryption
 //   - derive key using hpke export functionality, choose info string (maybe "seq"
@@ -44,6 +44,7 @@ mod packet;
 //     fec_block_num << 24 | (fec_packet_num ^ (0xff << 24))
 //     (highest byte is block num, lower 24 bits are packet num)
 //     TODO(thesis): if using this, note the inspiration from DTLS
+// TODO:
 // - maybe switch to big endian ints, to match raptorq and other net protocols
 // - for regular sessions, what about using "epochs" to utilize shorter packet
 //   seq numbers, with higher bits inferred (this allows packet disambiguiation
@@ -123,7 +124,7 @@ fn main() {
             Some(speed_kbps) => {
                 // We enforce speed limit in intervals of THROTTLE_TIME_STEP_MS
                 // KBPS * <ms_time_interval> = bytes/<ms_time_interval>
-                // TODO: make time step inversely proportional to speed
+                // TODO(thesis): make time step inversely proportional to speed
                 let throttle_time_step_ms = {
                     let t = 20_000 / speed_kbps;
                     if t == 0 { 1 } else { t }

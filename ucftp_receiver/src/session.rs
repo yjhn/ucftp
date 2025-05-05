@@ -120,7 +120,6 @@ pub struct EncryptedPacketWithSeq {
 impl EncryptedPacketWithSeq {
     // This will corrupt the packet's buffer, so the packet will become useless
     // either way
-    // TODO: create a new type EncryptedPacketWithSeq
     #[must_use]
     pub fn try_decrypt(
         mut self,
@@ -402,7 +401,6 @@ impl InProgressSession {
 
         // Encapsulated key
         // Try decapsulation using every known sender key
-        // TODO: is there a better method?
         // This will never fail, as we are using x25519_dalek, which
         // has infallible key deserialisation
         let encapped_key = EncappedKey::from_bytes(&packet[packet_used..packet_used + 32]).unwrap();
@@ -719,7 +717,6 @@ impl InProgressFecSession {
 
         // Encapsulated key
         // Try decapsulation using every known sender key
-        // TODO: is there a better method?
         // This will never fail, as we are using x25519_dalek, which
         // has infallible key deserialisation
         let encapped_key = EncappedKey::from_bytes(&packet[packet_used..packet_used + 32]).unwrap();
@@ -889,7 +886,7 @@ impl InProgressFecSession {
             None => {
                 // TODO: when the full session is received, discard packets destined
                 // for the same session for some time (30s?) to prevent creating fake
-                // sessions.
+                // sessions. TODO(thesis): note this
                 SessionStatus::Incomplete
             }
         }

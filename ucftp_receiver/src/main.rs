@@ -176,7 +176,6 @@ impl Receiver {
         };
         match packet_type {
             PacketType::FirstData => {
-                // TODO: init FEC packets
                 // TODO(refactor): don't decrypt the packet,
                 // hand it over immediately to the session, it will know
                 // whether it is worth decrypting
@@ -194,7 +193,8 @@ impl Receiver {
                 }
             }
             PacketType::RegularData | PacketType::LastData => {
-                // TODO: should processing be different between regular and last?
+                // TODO(thesis): note that currently this is a hint and not used for
+                // any decisions, at least in my implementation
                 let packet = match EncryptedPacket::try_from_buf(&mut packet[1..], packet_type) {
                     Ok(p) => p,
                     Err(e) => {
@@ -245,7 +245,6 @@ impl Receiver {
                 None
             }
             PacketType::ErrorCorrection => {
-                // TODO: add to session
                 let session_id = u64_from_le_bytes(&packet[1..]);
                 trace!(
                     "error correction packet for session {} received",
@@ -332,9 +331,6 @@ impl Receiver {
         let now = Instant::now();
         let mut i = 0;
         // Try merging with uninit session having same session ID
-        // TODO: here we check only uninit sessions. We should handle
-        // duplicate first packets gracefully, not by starting a new session
-        // for each, which will not work well
         while i < self.uninit_sessions.len() {
             let s = &self.uninit_sessions[i];
             // TODO(thesis): clearly specify that protocol time should only
@@ -367,9 +363,19 @@ impl Receiver {
             }
             i += 1;
         }
-        // This is a truly new session
-        self.add_in_progress(new_session);
-        None
+        // If this is a duplicate first packet, discard it
+        if self
+            .in_progress_sessions
+            .iter()
+            .find(|el| el.session_id() == new_session.session_id())
+            .is_some()
+        {
+            None
+        } else {
+            // This is a truly new session
+            self.add_in_progress(new_session);
+            None
+        }
     }
 
     pub fn receive_loop(&mut self) {
@@ -391,7 +397,6 @@ impl Receiver {
             //    - check if timeout occured
             // 4. hand over packet to that session
             if let Some(exec) = self.handle_packet(packet) {
-                // TODO: add debug print impl that ignores file contents
                 trace!("received command: {:?}", &exec);
                 self.command_executor.add_pending(exec);
             }
@@ -432,9 +437,6 @@ impl Receiver {
         let now = Instant::now();
         let mut i = 0;
         // Try merging with uninit session having same session ID
-        // TODO: here we check only uninit sessions. We should handle
-        // duplicate first packets gracefully, not by starting a new session
-        // for each, which will not work well
         while i < self.uninit_fec_sessions.len() {
             let s = &self.uninit_fec_sessions[i];
             // TODO(thesis): clearly specify that protocol time should only
@@ -467,8 +469,17 @@ impl Receiver {
             }
             i += 1;
         }
-        // This is a truly new session
-        self.add_in_progress_fec(new_session);
-        None
+        if self
+            .in_progress_fec_sessions
+            .iter()
+            .find(|el| el.session_id() == new_session.session_id())
+            .is_some()
+        {
+            None
+        } else {
+            // This is a truly new session
+            self.add_in_progress_fec(new_session);
+            None
+        }
     }
 }

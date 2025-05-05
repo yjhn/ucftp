@@ -207,6 +207,11 @@ impl FecPacketIter {
         // This also allows all packets to have almost everything identical starting with
         // session ID (session ID, seq, (time for init only), ciphertext, auth tag)
         // TODO: maybe also encrypt session ID of first packet?
+        // pros:
+        // - less info exposed
+        // cons:
+        // - more work has to be done by receiver to drop irrelevant (duplicate)
+        //   packets
         dump_le(&mut first_packet, session_id);
 
         // TODO(thesis): FEC init packet does not need a sequence number
@@ -219,13 +224,6 @@ impl FecPacketIter {
         // Time
         let t: u32 = protocol_time();
         first_packet.extend_from_slice(&t.to_le_bytes());
-
-        // TODO(thesis): idea - split FEC session into multiple parts to allow
-        // not keeping the whole session in memory at once. But then we need to
-        // track all the parts of the session somehow
-        // Maybe add add "part number" in front of ecnrypted data in FEC? But we still
-        // need to somehow identify which FEC packets belong to which part
-        // TODO: think about this
 
         // Body. Encryption works in-place, so we first write plaintext data to
         // the buffer and then encrypt it
