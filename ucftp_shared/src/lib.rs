@@ -19,7 +19,6 @@ use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
 use hybrid_array::Array;
 use hybrid_array::sizes::U16;
-use hybrid_array::sizes::U128;
 use rand_core::CryptoRng;
 use serialise::BufSerialize;
 use serialise::DeserializationError;
