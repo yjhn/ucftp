@@ -1,7 +1,7 @@
 use std::cmp::min;
 
 use hpke::{Serializable, aead::AeadCtxS};
-use log::{debug, trace};
+use log::trace;
 use rand::{CryptoRng, Rng};
 use ucftp_shared::{
     Aes128EcbEnc, ChosenAead, ChosenKdf, ChosenKem, EncappedKey, MIN_FIRST_PACKET_OVERHEAD,
@@ -160,7 +160,7 @@ impl FecPacketIter {
     /// Returns (FecPacketIter, first_packet)
     pub fn new(
         rng: &mut impl CryptoRng,
-        mut protocol_message: Vec<u8>,
+        protocol_message: Vec<u8>,
         mut crypto_ctx: AeadCtxS<ChosenAead, ChosenKdf, ChosenKem>,
         encapped_key: EncappedKey,
         packet_size: u16,

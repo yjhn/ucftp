@@ -1,6 +1,6 @@
 use std::{error::Error, net::Ipv4Addr, path::PathBuf, str::FromStr};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use ucftp_shared::{IP4_HEADER_SIZE, UDP_HEADER_SIZE, message::*};
 
 const SAFE_IP4_PACKET_SIZE: u16 = 1280 - IP4_HEADER_SIZE - UDP_HEADER_SIZE;

@@ -9,7 +9,7 @@ use std::{
     str::FromStr,
 };
 
-use log::{debug, error, info, trace, warn};
+use log::warn;
 use ucftp_shared::{
     message::*,
     serialise::{DeserializationError, TryBufDeserialize, u64_from_le_bytes},

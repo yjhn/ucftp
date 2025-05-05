@@ -1,7 +1,7 @@
 //! Global command executor. Manages command dependencies and wait times
 
 // TODO: maybe use a different thread/thread pool/tokio/smol
-use log::{debug, error, info, trace, warn};
+use log::{debug, info, warn};
 
 use std::{process, time::Instant};
 
