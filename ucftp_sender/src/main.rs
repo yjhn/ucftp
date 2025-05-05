@@ -25,25 +25,6 @@ mod cli;
 mod message;
 mod packet;
 
-// TODO(thesis):
-// - encrypt packet numbers (for regular and FEC sessions):
-//   - https://datatracker.ietf.org/doc/html/rfc9147#name-record-number-encryption
-//   - derive key using hpke export functionality, choose info string (maybe "seq"
-//     for regular packets and "fec" for fec packets)
-// - encode data with raptorq and THEN encrypt individual packets:
-//   - will need to modify hpke to expose setting counter value
-//   - could do this by creating function "with_counter(counter: u64)", that uses
-//     the supplied counter and does not touch the internal one
-//   - to not reuse counter values, utilize the fact that counter is u64 and use some
-//     value of upper 32 bits, like 1, and then lower 32 bits are taken directly from
-//     raptorq packet header. This is not their intended numbering, but in this case
-//     this does not matter; on the other hand, we should be able to use a sliding
-//     receive window:
-//     https://datatracker.ietf.org/doc/html/rfc9147#name-anti-replay
-//     So it might be better to decode the header and use
-//     fec_block_num << 24 | (fec_packet_num ^ (0xff << 24))
-//     (highest byte is block num, lower 24 bits are packet num)
-//     TODO(thesis): if using this, note the inspiration from DTLS
 // TODO:
 // - maybe switch to big endian ints, to match raptorq and other net protocols
 // - for regular sessions, what about using "epochs" to utilize shorter packet
@@ -96,14 +77,9 @@ fn main() {
     // Without any extensions
     let max_first_packet_data_size = packet_size - MIN_FIRST_PACKET_OVERHEAD;
     if max_first_packet_data_size as usize >= protocol_message.len() {
-        // TODO(thesis): note this caveat
         warn!("not using FEC, because all data fits in one packet");
         fec = false;
     }
-    // TODO(thesis): what to do if a session consisting of one packet gets duplicated?
-    // We should somehow prevent double execution. Maybe look at previously executed
-    // commands and do not execute unless a certain amount of time passed?
-    // This also might be the way to deal with packets received for timed out sessions
 
     let mut total_bytes_sent: usize;
     let send_start: Instant;
@@ -124,7 +100,6 @@ fn main() {
             Some(speed_kbps) => {
                 // We enforce speed limit in intervals of THROTTLE_TIME_STEP_MS
                 // KBPS * <ms_time_interval> = bytes/<ms_time_interval>
-                // TODO(thesis): make time step inversely proportional to speed
                 let throttle_time_step_ms = {
                     let t = 20_000 / speed_kbps;
                     if t == 0 { 1 } else { t }
@@ -184,8 +159,6 @@ fn main() {
             "sending command with session {}, using FEC",
             packet_iter.session_id()
         );
-        // TODO(thesis): First packet is special - it is not included in FEC, because it
-        // specifies FEC settings
         send_start = Instant::now();
         debug!("sending FEC session init packet");
         send_retry(&sock, &init_packet_buf);
@@ -197,24 +170,6 @@ fn main() {
             Some(speed_kbps) => {
                 // We enforce speed limit in intervals of THROTTLE_TIME_STEP_MS
                 // KBPS * <ms_time_interval> = bytes/<ms_time_interval>
-                // TODO(thesis): maybe note that time step should be inversely proportional to speed
-                // TODO(thesis): non-init packets will not include time field
-                // Reasoning:
-                // - session init packet must have time to detect replays
-                // - subsequent packets' decryption depends on the key from init
-                // - there is a truly negligible probability of randomly getting
-                //   the same keys for different sessions
-                // - without having the key, time cannot be reliably checked anyway
-                // - so if the replay attack happens:
-                //   - init packet replay will be detected, because it has a timestamp
-                //   - subsequent packets will be dropped if first one has old time
-                //   - if init packet is not received, subsequent packets will
-                //     be put in a session that will naturally time out without
-                //     decrypting them
-                //   - so there is no way to replay non-init packets without detection
-                //     assumbing no accidentally duplicate keys
-                //   - if session ID collision happens, it doesn't affect this
-                //     property, because packets will fail decryption
                 let throttle_time_step_ms = {
                     let t = 20_000 / speed_kbps;
                     if t == 0 { 1 } else { t }

@@ -53,7 +53,6 @@ pub type EncappedKey = <ChosenKem as hpke::Kem>::EncappedKey;
 pub type ChosenAead = AesGcm128;
 pub type ChosenKdf = HkdfSha256;
 
-// TODO(thesis): mention these sizes
 const _: () = if size_of::<EncappedKey>() != 32 {
     panic!()
 };
@@ -154,8 +153,6 @@ impl BufSerialize for SessionExtensions {
 
 impl TryBufDeserialize for SessionExtensions {
     fn try_deserialize_from_buf(buf: &[u8]) -> Result<(usize, Self), DeserializationError> {
-        // TODO(thesis): note that packet parsing must fail upon encountering unknown
-        // extensions
         if buf.is_empty() {
             return Err(DeserializationError::ValueExpected);
         }

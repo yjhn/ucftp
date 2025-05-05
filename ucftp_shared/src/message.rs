@@ -35,7 +35,6 @@ pub enum DeleteMode {
     /// Recursively delete directory
     Dir,
     /// Symbolic link. Hard link is not different to a regular file
-    // TODO(thesis): specify this
     Symlink,
     /// Any file system object, recursive for directories. If the object is a link,
     /// remove the link, not the object it points to

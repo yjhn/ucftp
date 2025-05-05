@@ -308,7 +308,6 @@ impl<A: Aead, Kdf: KdfTrait, Kem: KemTrait> AeadCtxR<A, Kdf, Kem> {
     }
 
     /// Open the given ciphertext with the given sequence number
-    // TODO(thesis): note that this uses HPKE-specific impl (seq is mixed with nonce)
     pub fn open_in_place_detached_seq(
         &mut self,
         ciphertext: &mut [u8],
@@ -441,7 +440,6 @@ impl<A: Aead, Kdf: KdfTrait, Kem: KemTrait> AeadCtxS<A, Kdf, Kem> {
     }
 
     /// Seals the given plaintext in place with given sequence number
-    // TODO(thesis): note that this uses HPKE-specific impl (seq is mixed with nonce)
     pub fn seal_in_place_detached_seq(
         &mut self,
         plaintext: &mut [u8],

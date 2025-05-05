@@ -16,10 +16,7 @@ use crate::message::CommandExecutor;
 type CryptoCtx = AeadCtxR<ChosenAead, ChosenKdf, ChosenKem>;
 
 // Packet timeout in seconds. This applies to packet send time,
-// to prevent replay attacks. Because protocol time uses UTC as base,
-// DST changes do not alter the protocol time, so we don't have to
-// tolerate them.
-// TODO(thesis): add this reasoning
+// to prevent replay attacks
 const PACKET_SEND_TIMEOUT: u32 = 400;
 // Progress timeout in seconds: how much time is allowed to pass between session
 // packet decryptions before discarding the session
@@ -166,16 +163,7 @@ impl EncryptedPacketWithSeq {
 
 pub struct UninitSession {
     session_id: u64,
-    // No packets can be decrypted without the first packet
-    // TODO(thesis): mention this limitation and that it cannot be
-    // removed without relying on possibly attacker-controlled and unverified
-    // data (because we cannot verify contents without the keys)
     packet_buf: Vec<EncryptedPacket>,
-    // Packet send time is encrypted. Even if it was not encrypted, we
-    // could not trust it, because we can't verify its correctness until
-    // we get the first packet. So the timeout logic in this case works
-    // as follows: first session packet must arrive within 30 seconds of the
-    // first received packet. Otherwise this session is discarded
     init_time: Instant,
 }
 
@@ -296,16 +284,7 @@ impl EncryptedRaptorqPacket {
 
 pub struct UninitFecSession {
     session_id: u64,
-    // No packets can be decrypted without the first packet
-    // TODO(thesis): mention this limitation and that it cannot be
-    // removed without relying on possibly attacker-controlled and unverified
-    // data (because we cannot verify contents without the keys)
     fec_packet_buf: Vec<EncryptedRaptorqPacket>,
-    // Packet send time is encrypted. Even if it was not encrypted, we
-    // could not trust it, because we can't verify its correctness until
-    // we get the first packet. So the timeout logic in this case works
-    // as follows: first session packet must arrive within 30 seconds of the
-    // first received packet. Otherwise this session is discarded
     init_time: Instant,
 }
 
@@ -351,12 +330,6 @@ pub struct InProgressSession {
     // Will only be needed if rekeying is implemented
     sender_pk: PublicKey,
     session_id: u64,
-    // session_extensions: SessionExtensions,
-    // sequence number of first packet is always 0 - TODO(thesis): it is
-    // probably a good idea to allow packet numbers to start from
-    // arbitrary value, as long as they will not overflow the counter - or
-    // it could overflow the counter and we could check that the seq is
-    // 0 < seq < start || progress < seq
     sequence_number_start: u64,
     command_buf: Vec<u8>,
     // packet sequence ID needed to make progress on decryption
@@ -389,11 +362,6 @@ impl InProgressSession {
         let mut packet_used = 6;
 
         // Extensions. InProgressSession does not support any
-        // TODO(thesis): note that extensions can customize anything after them,
-        // that's why they are in front of first packet. Examples:
-        // - different field sizes (session ID, seq)
-        // - different crypto algorithms
-        // - FEC
         if packet[packet_used] > 0 {
             return Err(PacketError::UnknownExtensions);
         }
@@ -584,29 +552,7 @@ impl InProgressSession {
         }
     }
 
-    // TODO(thesis): reasons to use/not use FEC:
-    // - for:
-    //   - packet loss tolerance
-    // - against:
-    //   - additional computation for encoder and decoder, especially for long
-    //     messages
-    //   - session timeouts are hard - they cannot rely on progress timeouts,
-    //     because decryption is done all at the same time. This means that
-    //     it is unclear when session can be declared as timed out - attacker
-    //     can feed packets one by one, exhausting receiver's memory. But timeouts
-    //     are also necessary in regular situations - sender process can be
-    //     killed in the middle of transfer - idea: dynamic timeout based on
-    //     the total command length from first packet (the longer the command,
-    //     the longer the timeout). Also, there should be a timeout of like 10s
-    //     after the first packet for the init packet to arrive
-    //   - higher memory usage, as the whole command has to be fully received
-    //     before being able to revocer the data. Note that this only applies if
-    //     the regular implementation is optimized to not store all the data
-    //     in memory (i.e. write file piece by piece as they are received)
-
     /// Check if this session is complete
-    // TODO(thesis): add that total length field really helps with detecting when
-    // the command has been fully received
     #[must_use]
     pub fn session_status(&self) -> SessionStatus {
         // Strategies to check if complete:
@@ -658,11 +604,6 @@ pub enum PacketError {
 }
 
 pub struct InProgressFecSession {
-    // TODO(thesis): to implement rekeying, we would need to split packets into
-    // groups with identifiers or possibly by packet number. Without groups or seq
-    // identifiers for each packet (including FEC packets), it is impossible to
-    // determine which key group packet belongs to
-    // Will only be needed if rekeying is implemented
     sender_pk: PublicKey,
     session_id: u64,
     command_buf: Vec<u8>,
@@ -695,7 +636,6 @@ impl InProgressFecSession {
         }
         let mut packet_used = 6;
         // Extensions. Currently we only support one: RaptorQ FEC
-        // TODO(thesis): move extensions header before encapped key
         let fec_decoder = match packet[packet_used] {
             0 => return Err(PacketError::ExpectedFecExtension),
             1 => {
@@ -817,16 +757,6 @@ impl InProgressFecSession {
         self.first_packet_time
     }
 
-    // TODO(thesis): reasons to use/not use FEC:
-    // - for:
-    //   - packet loss tolerance
-    // - against:
-    //   - additional computation for encoder and decoder, especially for long
-    //     messages
-    //   - higher memory usage, as the whole command has to be fully received
-    //     before being able to revocer the data. Note that this only applies if
-    //     the regular implementation is optimized to not store all the data
-    //     in memory (i.e. write file piece by piece as they are received)
     #[must_use]
     pub fn add_packet(
         &mut self,
@@ -886,7 +816,7 @@ impl InProgressFecSession {
             None => {
                 // TODO: when the full session is received, discard packets destined
                 // for the same session for some time (30s?) to prevent creating fake
-                // sessions. TODO(thesis): note this
+                // sessions
                 SessionStatus::Incomplete
             }
         }

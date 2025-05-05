@@ -59,13 +59,10 @@ impl PacketIter {
         }
     }
 
-    // TODO(thesis): include total session plaintext length as the first message field
     fn fill_packet(&mut self) {
         // Session ID
         dump_le(&mut self.packet_buffer, self.session_id);
         // Packet sequence number is a u48 stored in u64
-        // TODO(thesis): also encrypt first packet sequence number. Philosophy:
-        // encrypt everything possible so that decryption is still possible
         self.packet_buffer
             .extend_from_slice(&self.packet_sequence_number.to_le_bytes()[..6]);
         self.packet_sequence_number += 1;
@@ -74,9 +71,7 @@ impl PacketIter {
 
         // Only the first packet has time field
         if self.packet_sequence_number == 1 {
-            // Send time. TODO(thesis): do we really need to encrypt the time?
-            // If we do not encrypt it, we get no benefit. Time still must be verified
-            // to be trustworthy, so there is no harm in hiding it
+            // Send time
             let t: u32 = protocol_time();
             self.packet_buffer.extend_from_slice(&t.to_le_bytes());
         }
@@ -144,7 +139,6 @@ impl PacketIter {
             self.packet_buffer.push(PacketType::RegularData as u8);
             self.fill_packet();
         }
-        // TODO(thesis): what if first packet is also the last?
 
         Some(&self.packet_buffer)
     }
@@ -201,11 +195,6 @@ impl FecPacketIter {
         encapped_key.write_exact(&mut first_packet[start_idx..]);
 
         // Session ID
-        // TODO(thesis): don't move session ID and packet seq before encapped key
-        // Logic: encapped key should be in front to minimise error detection time:
-        // decap can fail
-        // This also allows all packets to have almost everything identical starting with
-        // session ID (session ID, seq, (time for init only), ciphertext, auth tag)
         // TODO: maybe also encrypt session ID of first packet?
         // pros:
         // - less info exposed
@@ -214,11 +203,7 @@ impl FecPacketIter {
         //   packets
         dump_le(&mut first_packet, session_id);
 
-        // TODO(thesis): FEC init packet does not need a sequence number
-        // Take this into account when calculating packet overhead size
-
-        // This is AAD end. TODO(thesis): specify precisely what is included in AAD for each
-        // type of packet and why
+        // This is AAD end.
         let aad_end = first_packet.len();
 
         // Time
@@ -245,34 +230,10 @@ impl FecPacketIter {
         auth_tag.write_exact(&mut first_packet[data_end..]);
 
         // Encrypt the remaining data
-        // TODO(thesis): we encrypt the whole remaining data in one go, AAD is session ID
-        // let fec_encoder = {
-        //     // This encryption MUST happen after first packet encryption. Encryption
-        //     // order matters.
-        //     let auth_tag = crypto_ctx
-        //         .seal_in_place_detached(
-        //             &mut protocol_message[first_packet_data_size as usize..],
-        //             &session_id.to_le_bytes(),
-        //         )
-        //         .unwrap();
-        //     debug!(
-        //         "encrypted the remaining message: {} bytes",
-        //         protocol_message.len() - first_packet_data_size as usize,
-        //     );
-        //     // Auth tag
-        //     let data_end = protocol_message.len();
-        //     for _ in 0..16u8 {
-        //         protocol_message.push(0);
-        //     }
-        //     auth_tag.write_exact(&mut protocol_message[data_end..]);
-        //     raptorq::Encoder::new(&protocol_message[first_packet_data_size..], oti)
-        // };
         let fec_encoder = raptorq::Encoder::new(&protocol_message[first_packet_data_size..], oti);
         let packets = {
             let source_packets = (protocol_message.len() - first_packet_data_size as usize)
                 .div_ceil(packet_size as usize) as u32;
-            // TODO(thesis): what to do if there is only one FEC packet? Do we add another
-            // FEC packet always or only if fec_overhead_percent >= 100? 50?
             fec_encoder.get_encoded_packets(source_packets * fec_overhead_percent as u32 / 100)
         };
 

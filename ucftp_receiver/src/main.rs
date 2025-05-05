@@ -29,15 +29,6 @@ use socket2::{Domain, Socket, Type};
 use ucftp_shared::serialise::u64_from_le_bytes;
 use ucftp_shared::*;
 
-// TODO(thesis):
-// implementation-guided protocol improvements:
-// - length prepended to message
-// - removal of packet len field
-// - rekeying? (currently not implemented) - forward secrecy is nice, but not really
-//   beneficial in the case of ucftp. The sessions are too short
-// - test by sending large file to /dev/null (this will also reveal packet loss
-//   problems) - also add such a test to thesis, including throttling discussion
-
 // Equipment that allows frames larger than 9216 bytes is very rare
 const MAX_PACKET_SIZE: u16 = 9216 - 18 - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
 const SUPPORTED_PACKET_SIZE: u16 = 1500;
@@ -73,8 +64,7 @@ fn create_socket() -> UdpSocket {
     socket
         .bind(&RECEIVE_ADDR.into())
         .expect("Failed to bind to port 4321");
-    // TODO(thesis): mention this and that it improves reliability with larger file
-    // transfers, at least without FEC
+    // This improves packet delivery reliability
     socket.set_recv_buffer_size(RECV_BUFFER_SIZE).unwrap();
     info!("listening on {}", RECEIVE_ADDR);
     socket.into()
@@ -193,8 +183,6 @@ impl Receiver {
                 }
             }
             PacketType::RegularData | PacketType::LastData => {
-                // TODO(thesis): note that currently this is a hint and not used for
-                // any decisions, at least in my implementation
                 let packet = match EncryptedPacket::try_from_buf(&mut packet[1..], packet_type) {
                     Ok(p) => p,
                     Err(e) => {
@@ -333,10 +321,6 @@ impl Receiver {
         // Try merging with uninit session having same session ID
         while i < self.uninit_sessions.len() {
             let s = &self.uninit_sessions[i];
-            // TODO(thesis): clearly specify that protocol time should only
-            // be used to prevent replay attacks. Regular timing facilities
-            // should be used for session timeouts
-
             // If this session happens to be the matching one, by removing
             // it we are much more likely to loop over all remaining ones
             // TODO: we should only check timeouts occasioanlly
@@ -439,10 +423,6 @@ impl Receiver {
         // Try merging with uninit session having same session ID
         while i < self.uninit_fec_sessions.len() {
             let s = &self.uninit_fec_sessions[i];
-            // TODO(thesis): clearly specify that protocol time should only
-            // be used to prevent replay attacks. Regular timing facilities
-            // should be used for session timeouts
-
             // If this session happens to be the matching one, by removing
             // it we are much more likely to loop over all remaining ones
             // TODO: we should only check timeouts occasioanlly

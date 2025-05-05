@@ -30,10 +30,6 @@ impl GlobalExecutor {
         }
     }
 
-    // TODO(thesis): specify that the timeouts only start after the whole command
-    // has been received and decoded (or maybe that implementations can choose?)
-    // Also specify that giving unless/after timeouts of 0 with session IDs is
-    // a no-op
     pub fn add_pending(&mut self, mut command: CommandExecutor) {
         debug!("new command {} added to executor", command.session_id());
         // Check preconditions

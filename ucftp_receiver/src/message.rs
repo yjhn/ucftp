@@ -15,26 +15,6 @@ use ucftp_shared::{
     serialise::{DeserializationError, TryBufDeserialize, u64_from_le_bytes},
 };
 
-// FEC using RaptorQ crate
-// Notes:
-// - FEC takes a buffer of data and desirable packet len, and:
-//   1. produces a number of source packets from source, and prepends each packet
-//      with 4-byte ID, consisting of sequential number and source block number
-//      Will pad the block with zeros if data size is not a multiple of packet size.
-//
-//      Nobody requires us to send that padding. We can encode, say, 100 packets at
-//      a time and since only the last packet is padded, we don't have to include the
-//      padding. Padding len can be calculated (and appended for the decoding
-//      purposes by the receiver) based on packet number (assuming we
-//      have the first packet, which contains all required information, including
-//      the start of the packet sequence counter). First packet can be interleaved and
-//      periodically sent along with others (without giving it a different counter),
-//      to maximise delivery probability
-//   2. produces any number of repair packets (user-specified)
-// - no more than 256 (source?) packets can be generated per block
-// - encoding of packet numbers is big-endian
-//
-
 pub struct FileData {
     data: Box<[u8]>,
 }
@@ -98,11 +78,7 @@ pub enum Command {
         file_data: FileData,
     },
     RenameItem {
-        // TODO(thesis): no need to limit renaming/moving to fields and dirs. Links also work just fine
         absolute_path: Box<str>,
-        // TODO(thesis): renaming should not differ from moving just by path
-        // interpretation (relative vs absolute). Here new_name will be treated as
-        // just a name, not a path
         new_name: Box<str>,
     },
     MoveItem {
@@ -356,12 +332,10 @@ impl Command {
                 env_vars,
                 program_args,
             } => {
-                // TODO(thesis): what about removing env vars for this execution?
                 match process::Command::new(absolute_path.as_ref())
                     .args(program_args.iter().map(|s| s.as_ref()))
                     .envs(env_vars.iter().map(|(k, v)| (k.as_ref(), v.as_ref())))
-                    .spawn() // TODO: spawn a reaper process that reaps child processes with child.try_wait() - no reaper process needed,
-                // global executor can occasionally check on all processes
+                    .spawn()
                 {
                     Ok(p) => CommandExecutionResult::Process(p),
                     Err(e) => CommandExecutionResult::Error(e),
@@ -371,13 +345,7 @@ impl Command {
                 Ok(_) => CommandExecutionResult::Success,
                 Err(e) => CommandExecutionResult::Error(e),
             },
-            // TODO(thesis): mention that the vars are set/removed only for this
-            // process and its children (i.e. ones that it directly executes).
-            // Notably, these commands do not alter system state. System state
-            // can be altered by e.g. writing to /etc/environment on Linux or ?
-            // on Windows
             Command::SetEnvVars { env_vars } => {
-                // TODO(thesis): what about appending to envs vars, e.g. PATH?
                 for (k, v) in env_vars.iter() {
                     // SAFETY: safe if the current program is single-threaded or
                     // is Rust-only (Rust std uses a lock). Threads share the
@@ -401,8 +369,6 @@ impl Command {
                 env_vars,
                 program_args,
             } => {
-                // TODO(thesis): what about making files executable? Maybe include a
-                // flag in file transfer? *nix and Windows has execute permission
                 if let Some(c) = executed_commands
                     .iter()
                     .find(|e| e.session_id == transfer_session_id)
@@ -419,8 +385,6 @@ impl Command {
                     CommandExecutionResult::SessionNotFound(transfer_session_id)
                 }
             }
-            // TODO(thesis): what about parent dirs? Should they be automatically
-            // created or not?
             Command::CreateDir {
                 absolute_path,
                 mode,
@@ -540,10 +504,8 @@ impl Command {
                 kind,
             } => match mode {
                 CreateLinkMode::Overwrite => {
-                    // TODO(thesis): we probably should not overwrite if src is
-                    // non-empty dir
-                    // TODO(thesis): should we memorize the path for later reference?
-                    // Try to remove it first as dir, then as file
+                    // We remove: file, link, empty dir. Notably, non-empty dirs
+                    // are left untouched
                     match fs::remove_dir(absolute_path_src.as_ref()) {
                         Ok(_) => (),
                         Err(e) => {
@@ -583,8 +545,6 @@ impl Command {
                 let p = Path::new(absolute_path.as_ref());
                 if p.exists() {
                     match mode {
-                        // TODO(thesis): what should be the result if this is not a
-                        // file? Success? Fail?
                         DeleteMode::File => {
                             // Make sure this is not a link
                             if p.is_file() && !p.is_symlink() {
@@ -659,8 +619,6 @@ impl Command {
                         }
                     }
                 } else {
-                    // TODO(thesis): specify that if the path does not exist, the
-                    // command is considered successful
                     CommandExecutionResult::Success
                 }
             }
@@ -802,7 +760,6 @@ impl CommandExecutor {
             if command_buf.len() < buf_used + 8 {
                 return Err(DeserializationError::ValueExpected);
             }
-            // TODO(thesis): if sender sets a timeout, this session ID must be valid
             let session_id = u64_from_le_bytes(&command_buf[buf_used..]);
             buf_used += 8;
             UnlessSession {
@@ -820,8 +777,6 @@ impl CommandExecutor {
                 <u64 as TryBufDeserialize>::try_deserialize_from_buf(&command_buf[buf_used..])?;
             buf_used += used;
             let mut session_ids = Vec::with_capacity(count as usize);
-            // TODO(thesis): specify that if sender sets a timeout here,
-            // the list must include at least one session
             for _ in 0..count {
                 if command_buf.len() < buf_used + 8 {
                     return Err(DeserializationError::ValueExpected);
@@ -927,11 +882,6 @@ fn check_c_err<T: Ord + Default>(num: T) -> io::Result<()> {
 /// commands:
 /// - ExecuteReceived: path of the file
 /// - AppendToFileFromTransfer: path of the file
-// TODO(thesis): should these be able to refer to any file touched by a previous
-// command, e.g. link, move, rename, transfer?
-// Or maybe remove these references entirely and manage them entirely on sender's
-// side by translating CLI references to actual paths? How complexity on the
-// receiver is it worth to avoid transmitting paths?
 pub struct CompactCommandSession {
     session_id: u64,
     path: Box<str>,

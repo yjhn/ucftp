@@ -29,7 +29,6 @@ pub fn serialise_message(command: &Command, ua: UnlessAfter) -> Vec<u8> {
     com_enc.encode_command(command);
 
     buf = com_enc.into_buf();
-    // TODO(thesis): include this total message length
     let len_bytes = ((buf.len() - 8) as u64).to_le_bytes();
     buf[..8].copy_from_slice(&len_bytes);
     buf
