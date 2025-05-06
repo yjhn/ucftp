@@ -23,13 +23,19 @@ impl BufSerialize for u64 {
         if self <= U64_SER_BYTE_MAX as u64 {
             buf.push(bytes[0]);
             return;
+        } else if self <= 255 {
+            // U64_SER_BYTE_MAX < self <= 255 is encoded as u16
+            buf.push(U64_SER_BYTE_MAX + 1);
+            buf.push(bytes[0]);
+            buf.push(0);
+            return;
         }
 
         // Calculate number of bytes used to represent a number - 1
         let used_bytes = self.ilog2() / 8;
 
         buf.push(U64_SER_BYTE_MAX + used_bytes as u8);
-        buf.extend_from_slice(&bytes[..used_bytes as usize]);
+        buf.extend_from_slice(&bytes[..used_bytes as usize + 1]);
     }
 }
 
@@ -40,7 +46,7 @@ impl BufDeserialize for u64 {
             return (1, fb as u64);
         }
 
-        let used_bytes = (fb - U64_SER_BYTE_MAX) as usize + 1;
+        let used_bytes = u64_used_bytes(fb);
         let mut int = [0; 8];
         int[..used_bytes].copy_from_slice(&buf[1..=used_bytes]);
         (used_bytes + 1, u64::from_le_bytes(int))
@@ -57,13 +63,19 @@ impl BufSerialize for u32 {
         if self <= U32_SER_BYTE_MAX as u32 {
             buf.push(bytes[0]);
             return;
+        } else if self <= 255 {
+            // U32_SER_BYTE_MAX < self <= 255 is encoded as u16
+            buf.push(U32_SER_BYTE_MAX + 1);
+            buf.push(bytes[0]);
+            buf.push(0);
+            return;
         }
 
         // Calculate number of bytes used to represent a number - 1
         let used_bytes = self.ilog2() / 8;
 
         buf.push(U32_SER_BYTE_MAX + used_bytes as u8);
-        buf.extend_from_slice(&bytes[..used_bytes as usize]);
+        buf.extend_from_slice(&bytes[..used_bytes as usize + 1]);
     }
 }
 
@@ -74,7 +86,7 @@ impl BufDeserialize for u32 {
             return (1, fb as u32);
         }
 
-        let used_bytes = (fb - U32_SER_BYTE_MAX) as usize + 1;
+        let used_bytes = u32_used_bytes(fb);
         let mut int = [0; 4];
         int[..used_bytes].copy_from_slice(&buf[1..=used_bytes]);
         (used_bytes + 1, u32::from_le_bytes(int))
@@ -120,6 +132,15 @@ where
     fn try_deserialize_from_buf(buf: &[u8]) -> Result<(usize, Self), DeserializationError>;
 }
 
+/// How many bytes is the actual number using
+fn u64_used_bytes(first_byte: u8) -> usize {
+    (first_byte - U64_SER_BYTE_MAX) as usize + 1
+}
+
+fn u32_used_bytes(first_byte: u8) -> usize {
+    (first_byte - U32_SER_BYTE_MAX) as usize + 1
+}
+
 impl TryBufDeserialize for u64 {
     fn try_deserialize_from_buf(buf: &[u8]) -> Result<(usize, u64), DeserializationError> {
         if buf.is_empty() {
@@ -130,7 +151,7 @@ impl TryBufDeserialize for u64 {
             return Ok((1, fb as u64));
         }
 
-        let used_bytes = (fb - U64_SER_BYTE_MAX) as usize;
+        let used_bytes = u64_used_bytes(fb);
         if buf.len() < used_bytes + 1 {
             return Err(DeserializationError::IncompleteValue);
         }
@@ -150,7 +171,7 @@ impl TryBufDeserialize for u32 {
             return Ok((1, fb as u32));
         }
 
-        let used_bytes = (fb - U32_SER_BYTE_MAX) as usize;
+        let used_bytes = u32_used_bytes(fb);
         if buf.len() < used_bytes + 1 {
             return Err(DeserializationError::IncompleteValue);
         }
@@ -270,14 +291,23 @@ pub fn seq_deser(buf: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::BitAnd;
+
     use crate::serialise::{BufDeserialize, BufSerialize};
 
     use super::TryBufDeserialize;
 
-    fn serde<S: BufSerialize, D: BufDeserialize>(val: S) -> D {
+    fn serde<S: BufSerialize, D: BufDeserialize + TryBufDeserialize + BitAnd<D, Output = D>>(
+        val: S,
+    ) -> D {
         let mut buf = Vec::with_capacity(1000);
         val.serialize_to_buf(&mut buf);
-        <D as BufDeserialize>::deserialize_from_buf(&buf).1
+        let v1 = <D as BufDeserialize>::deserialize_from_buf(&buf).1;
+        let v2 = <D as TryBufDeserialize>::try_deserialize_from_buf(&buf)
+            .unwrap()
+            .1;
+        // If they are not the same, result will be wrong
+        v1 & v2
     }
 
     #[test]
@@ -286,6 +316,7 @@ mod tests {
         assert_eq!(1u64, serde(1u64));
         assert_eq!(12u64, serde(12u64));
         assert_eq!(123u64, serde(123u64));
+        assert_eq!(255u64, serde(255u64));
         assert_eq!(1234u64, serde(1234u64));
         assert_eq!(12345u64, serde(12345u64));
         assert_eq!(123456u64, serde(123456u64));
@@ -306,6 +337,7 @@ mod tests {
         assert_eq!(1u32, serde(1u32));
         assert_eq!(12u32, serde(12u32));
         assert_eq!(123u32, serde(123u32));
+        assert_eq!(255u32, serde(255u32));
         assert_eq!(1234u32, serde(1234u32));
         assert_eq!(12345u32, serde(12345u32));
         assert_eq!(123456u32, serde(123456u32));
