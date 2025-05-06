@@ -1,7 +1,7 @@
 use std::str;
 
-pub const U64_SER_BYTE_MAX: u8 = 247;
-pub const U32_SER_BYTE_MAX: u8 = 251;
+pub const U64_SER_BYTE_MAX: u8 = 248;
+pub const U32_SER_BYTE_MAX: u8 = 252;
 
 pub trait BufSerialize {
     /// Write serialized version of the value to buf. Returns number of bytes written.
@@ -15,8 +15,8 @@ pub trait BufDeserialize {
 
 impl BufSerialize for u64 {
     /// Serialise int to a representation that favors small numbers:
-    /// - if 0 <= int < 248, result is int
-    /// - if int > 247, the first encoded byte is 247 + <number of bytes used by int>,
+    /// - if 0 <= int <= U64_SER_BYTE_MAX, result is int
+    /// - if int > U64_SER_BYTE_MAX, the first encoded byte is U64_SER_BYTE_MAX + <number of bytes used by int> - 1,
     ///   which is then followed by int bytes in little-endian order
     fn serialize_to_buf(self, buf: &mut Vec<u8>) {
         let bytes = self.to_le_bytes();
@@ -25,8 +25,8 @@ impl BufSerialize for u64 {
             return;
         }
 
-        // Calculate number of bytes used to represent a number
-        let used_bytes = self.ilog2() / 8 + 1;
+        // Calculate number of bytes used to represent a number - 1
+        let used_bytes = self.ilog2() / 8;
 
         buf.push(U64_SER_BYTE_MAX + used_bytes as u8);
         buf.extend_from_slice(&bytes[..used_bytes as usize]);
@@ -40,7 +40,7 @@ impl BufDeserialize for u64 {
             return (1, fb as u64);
         }
 
-        let used_bytes = (fb - U64_SER_BYTE_MAX) as usize;
+        let used_bytes = (fb - U64_SER_BYTE_MAX) as usize + 1;
         let mut int = [0; 8];
         int[..used_bytes].copy_from_slice(&buf[1..=used_bytes]);
         (used_bytes + 1, u64::from_le_bytes(int))
@@ -49,8 +49,8 @@ impl BufDeserialize for u64 {
 
 impl BufSerialize for u32 {
     /// Serialise int to a representation that favors small numbers:
-    /// - if 0 <= int < 252, result is int
-    /// - if int > 251, the first encoded byte is 251 + <number of bytes used by int>,
+    /// - if 0 <= int <= U32_SER_BYTE_MAX, result is int
+    /// - if int > U32_SER_BYTE_MAX, the first encoded byte is U32_SER_BYTE_MAX + <number of bytes used by int> - 1,
     ///   which is then followed by int bytes in little-endian order
     fn serialize_to_buf(self, buf: &mut Vec<u8>) {
         let bytes = self.to_le_bytes();
@@ -59,8 +59,8 @@ impl BufSerialize for u32 {
             return;
         }
 
-        // Calculate number of bytes used to represent a number
-        let used_bytes = self.ilog2() / 8 + 1;
+        // Calculate number of bytes used to represent a number - 1
+        let used_bytes = self.ilog2() / 8;
 
         buf.push(U32_SER_BYTE_MAX + used_bytes as u8);
         buf.extend_from_slice(&bytes[..used_bytes as usize]);
@@ -74,7 +74,7 @@ impl BufDeserialize for u32 {
             return (1, fb as u32);
         }
 
-        let used_bytes = (fb - U32_SER_BYTE_MAX) as usize;
+        let used_bytes = (fb - U32_SER_BYTE_MAX) as usize + 1;
         let mut int = [0; 4];
         int[..used_bytes].copy_from_slice(&buf[1..=used_bytes]);
         (used_bytes + 1, u32::from_le_bytes(int))
