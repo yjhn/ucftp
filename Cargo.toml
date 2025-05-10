@@ -18,7 +18,8 @@ description = "Unidirectional Control and Data Transfer Protocol"
 [profile.release]
 lto = "fat"
 codegen-units = 1
-# this does not affect backtraces
+# backtraces will not indicate file/line
+# but allows to eliminate unwinding code from panic locations
 panic = "abort"
 
 [workspace.dependencies]
