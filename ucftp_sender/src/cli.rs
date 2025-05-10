@@ -3,7 +3,10 @@ use std::{error::Error, net::Ipv4Addr, path::PathBuf, str::FromStr};
 use clap::{Parser, Subcommand};
 use ucftp_shared::{IP4_HEADER_SIZE, UDP_HEADER_SIZE, message::*};
 
-const SAFE_IP4_PACKET_SIZE: u16 = 1280 - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
+/// Safe maximum packet size, including IP and UDP headers.
+/// IPv6 requires hosts to support at least 1280;
+const SAFE_MTU: u16 = 1280;
+const SAFE_IP4_PACKET_SIZE: u16 = SAFE_MTU - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
 
 /// Unidirectional Command and File Transfer Protocol CLI.
 /// Send commands and data to a remote machine.
@@ -31,9 +34,9 @@ pub struct Cli {
     #[arg(long = "awt", requires = "after_session_ids")]
     pub after_wait: Option<u32>,
     /// Packet size to use. IP + UDP headers included
-    #[arg(short = 'p', default_value_t = SAFE_IP4_PACKET_SIZE)]
+    #[arg(short = 'p', default_value_t = SAFE_MTU)]
     pub packet_size: u16,
-    /// Directory where the keys are stored. Key must be named sender_sk.pem
+    /// Directory where the keys are stored. Key files must be named sender_sk.pem
     /// sender_pk.pem for secret (private) and public keys respectively
     #[arg(short = 'k')]
     pub sender_keys_dir: Option<PathBuf>,
