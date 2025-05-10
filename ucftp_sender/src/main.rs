@@ -55,6 +55,8 @@ fn main() {
         mut fec,
         fec_overhead_percent,
     } = cli;
+    // packet size from cli includes all headers
+    let packet_size = packet_size - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
 
     let protocol_message = serialise_message(
         &command,

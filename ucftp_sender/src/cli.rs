@@ -6,7 +6,6 @@ use ucftp_shared::{IP4_HEADER_SIZE, UDP_HEADER_SIZE, message::*};
 /// Safe maximum packet size, including IP and UDP headers.
 /// IPv6 requires hosts to support at least 1280;
 const SAFE_MTU: u16 = 1280;
-const SAFE_IP4_PACKET_SIZE: u16 = SAFE_MTU - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
 
 /// Unidirectional Command and File Transfer Protocol CLI.
 /// Send commands and data to a remote machine.
