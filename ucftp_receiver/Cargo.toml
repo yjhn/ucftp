@@ -14,6 +14,7 @@ rand.workspace = true
 log.workspace = true
 env_logger.workspace = true
 raptorq.workspace = true
+mimalloc.workspace = true
 ucftp_shared = { path = "../ucftp_shared" }
 libc = "0.2.172"
 socket2 = "0.5.9"

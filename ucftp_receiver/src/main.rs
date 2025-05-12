@@ -29,6 +29,10 @@ use socket2::{Domain, Socket, Type};
 use ucftp_shared::serialise::u64_from_le_bytes;
 use ucftp_shared::*;
 
+use mimalloc::MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 // Equipment that allows frames larger than 9216 bytes is very rare
 const MAX_PACKET_SIZE: u16 = 9216 - 18 - IP4_HEADER_SIZE - UDP_HEADER_SIZE;
 const SUPPORTED_PACKET_SIZE: u16 = 1500;

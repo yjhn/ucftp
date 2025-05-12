@@ -21,9 +21,15 @@ use std::time::Instant;
 use message::UnlessAfter;
 use message::serialise_message;
 
+use mimalloc::MiMalloc;
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 mod cli;
 mod message;
 mod packet;
+
+const IP4_OVERHEAD: u16 = IP4_HEADER_SIZE + UDP_HEADER_SIZE;
 
 // TODO:
 // - maybe switch to big endian ints, to match raptorq and other net protocols
@@ -96,6 +102,7 @@ fn main() {
         info!("sending command with session {}", packet_iter.session_id());
 
         send_start = Instant::now();
+        info!("send started at: {:?}", send_start);
         total_bytes_sent = 0;
         match max_speed {
             // Apply throttling
@@ -137,18 +144,19 @@ fn main() {
                         actual_bytes -= desired_bytes;
                     }
                     send_retry(&sock, packet);
-                    total_bytes_sent += packet.len();
-                    actual_bytes += packet.len() as u32;
+                    total_bytes_sent += packet.len() + IP4_OVERHEAD as usize;
+                    actual_bytes += packet.len() as u32 + IP4_OVERHEAD as u32;
                 }
             }
             None => {
                 while let Some(packet) = packet_iter.next_packet() {
                     send_retry(&sock, packet);
-                    total_bytes_sent += packet.len();
+                    total_bytes_sent += packet.len() + IP4_OVERHEAD as usize;
                 }
             }
         }
     } else {
+        info!("encoding data with FEC");
         let (mut packet_iter, mut init_packet_buf) = FecPacketIter::new(
             &mut rng,
             protocol_message,
@@ -164,7 +172,7 @@ fn main() {
         send_start = Instant::now();
         debug!("sending FEC session init packet");
         send_retry(&sock, &init_packet_buf);
-        total_bytes_sent = init_packet_buf.len();
+        total_bytes_sent = init_packet_buf.len() + IP4_OVERHEAD as usize;
         init_packet_buf.clear();
         debug!("sending FEC packets");
         match max_speed {
@@ -207,21 +215,22 @@ fn main() {
                         actual_bytes -= desired_bytes;
                     }
                     send_retry(&sock, &init_packet_buf);
-                    total_bytes_sent += init_packet_buf.len();
-                    actual_bytes += init_packet_buf.len() as u32;
+                    total_bytes_sent += init_packet_buf.len() + IP4_OVERHEAD as usize;
+                    actual_bytes += init_packet_buf.len() as u32 + IP4_OVERHEAD as u32;
                     init_packet_buf.clear();
                 }
             }
             None => {
                 while packet_iter.next_packet_buf(&mut init_packet_buf) {
                     send_retry(&sock, &init_packet_buf);
-                    total_bytes_sent += init_packet_buf.len();
+                    total_bytes_sent += init_packet_buf.len() + IP4_OVERHEAD as usize;
                     init_packet_buf.clear();
                 }
             }
         }
     }
     let total_duration = Instant::now().duration_since(send_start);
+    info!("send ended at: {:?}", Instant::now());
     let secs = total_duration.as_secs_f32();
     let speed = total_bytes_sent as f32 / (secs * 1000.0);
     info!("average send speed: {speed:.2} kB/s");
