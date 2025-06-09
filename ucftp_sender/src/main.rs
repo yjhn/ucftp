@@ -230,10 +230,11 @@ fn main() {
         }
     }
     let total_duration = Instant::now().duration_since(send_start);
-    info!("send ended at: {:?}", Instant::now());
-    let secs = total_duration.as_secs_f32();
-    let speed = total_bytes_sent as f32 / (secs * 1000.0);
+    info!("total duration: {:?}", total_duration);
+    let secs = total_duration.as_secs_f64();
+    let speed = total_bytes_sent as f64 / (secs * 1000.0);
     info!("average send speed: {speed:.2} kB/s");
+    info!("total sent: {:.2} kB", total_bytes_sent as f64 / 1000.0);
     info!("command sent, shutting down");
 }
 

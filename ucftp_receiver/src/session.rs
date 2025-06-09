@@ -772,6 +772,7 @@ impl InProgressFecSession {
         );
         match packet.try_decrypt(&self.aes_ecb, &mut self.crypto_ctx) {
             Ok(p) => {
+                self.first_packet_time = now;
                 self.fec_decoder.add_new_packet(p);
                 self.session_status()
             }

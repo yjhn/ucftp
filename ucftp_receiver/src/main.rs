@@ -375,15 +375,6 @@ impl Receiver {
             packet.truncate(packet_len);
             trace!("packet from {}", addr);
 
-            // Packet processing steps:
-            // 1. determine type:
-            //    - first
-            //    - regular
-            // 2. parse:
-            //    - if error, discard and log reason
-            // 3. find session with matching session id
-            //    - check if timeout occured
-            // 4. hand over packet to that session
             if let Some(exec) = self.handle_packet(packet) {
                 trace!("received command: {:?}", &exec);
                 self.command_executor.add_pending(exec);

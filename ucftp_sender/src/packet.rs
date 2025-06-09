@@ -234,7 +234,9 @@ impl FecPacketIter {
         let packets = {
             let source_packets = (protocol_message.len() - first_packet_data_size as usize)
                 .div_ceil(packet_size as usize) as u32;
-            fec_encoder.get_encoded_packets(source_packets * fec_overhead_percent as u32 / 100)
+            fec_encoder.get_encoded_packets(
+                source_packets * fec_overhead_percent as u32 / (100 * oti.source_blocks() as u32),
+            )
         };
 
         let key = crypto_ctx.fec_packet_seq_key();
